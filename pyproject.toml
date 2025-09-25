@@ -1,0 +1,11 @@
+[project]
+name = "mcp-feishu-bot"
+version = "0.1.0"
+description = "A Feishu bot using MCP (Model Context Protocol)"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "fastmcp>=2.12.3",
+    "lark-oapi>=1.4.23",
+    "python-socks>=2.7.2",
+]
