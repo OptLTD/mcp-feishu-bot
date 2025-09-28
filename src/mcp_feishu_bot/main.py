@@ -16,10 +16,10 @@ from typing import Optional
 warnings.filterwarnings("ignore", category=DeprecationWarning)
 
 from fastmcp import FastMCP
-from drive import DriveHandle
-from client import FeishuClient
-from message import MessageHandle
-from bitable import BitableHandle
+from mcp_feishu_bot.drive import DriveHandle
+from mcp_feishu_bot.client import FeishuClient
+from mcp_feishu_bot.message import MessageHandle
+from mcp_feishu_bot.bitable import BitableHandle
 
 # Initialize FastMCP server
 mcp = FastMCP("Feishu MCP Server")
@@ -74,6 +74,13 @@ def cleanup_feishu_client():
 
 # Register cleanup function to run on exit
 atexit.register(cleanup_feishu_client)
+
+def main() -> None:
+    """Entry point for console script to start MCP server.
+    Intention: Provide a stable callable for packaging.
+    """
+    initialize_feishu_client()
+    mcp.run(show_banner=False)
 
 
 @mcp.tool
@@ -287,8 +294,5 @@ def drive_delete_file(file_token: str, file_type: str) -> str:
 
 
 if __name__ == "__main__":
-    # Initialize Feishu client on startup
-    initialize_feishu_client()
-    
-    # Start the MCP server
-    mcp.run(show_banner=False)
+    # Allow direct execution via python -m or script run
+    main()

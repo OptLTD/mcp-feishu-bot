@@ -30,7 +30,7 @@ from lark_oapi.api.bitable.v1 import (
     AppTableRecord
 )
 
-from client import FeishuClient
+from mcp_feishu_bot.client import FeishuClient
 
 
 class BitableHandle(FeishuClient):

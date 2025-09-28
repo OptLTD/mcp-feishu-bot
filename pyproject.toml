@@ -9,3 +9,18 @@ dependencies = [
     "lark-oapi>=1.4.23",
     "python-socks>=2.7.2",
 ]
+
+[project.scripts]
+# Console script entrypoint for starting the MCP server
+mcp-feishu-bot = "mcp_feishu_bot.main:main"
+
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.package-dir]
+"" = "src"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["mcp_feishu_bot*"]

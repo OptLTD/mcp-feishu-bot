@@ -19,7 +19,7 @@ from lark_oapi.api.drive.v1 import (
     DeleteFileRequest
 )
 
-from client import FeishuClient
+from mcp_feishu_bot.client import FeishuClient
 
 
 class DriveHandle(FeishuClient):

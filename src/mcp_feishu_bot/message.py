@@ -22,7 +22,7 @@ from lark_oapi.api.im.v1 import (
     CreateFileRequest, CreateFileRequestBody
 )
 
-from client import FeishuClient
+from mcp_feishu_bot.client import FeishuClient
 
 
 class MessageHandle(FeishuClient):
