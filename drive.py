@@ -157,3 +157,84 @@ class DriveHandle(FeishuClient):
                     "request_id": ""
                 }
             }
+
+    def describe_files_markdown(self, folder_token: str = "", options: Dict[str, Any] | None = None) -> str:
+        """List files and return a Markdown summary with a JSON block.
+        Intention: Move pagination and formatting out of main into the handle for reuse.
+        """
+        opts = options or {}
+        page_size = int(opts.get("page_size", 50))
+        order_by = str(opts.get("order_by", "EditedTime"))
+        direction = str(opts.get("direction", "DESC"))
+        user_id_type = str(opts.get("user_id_type", "email"))
+        query = str(opts.get("query", ""))
+
+        files: List[Dict[str, Any]] = []
+        page_token = ""
+        while True:
+            resp = self.list_files(
+                folder_token=folder_token,
+                page_token=page_token,
+                page_size=page_size,
+                order_by=order_by,
+                direction=direction,
+                user_id_type=user_id_type,
+            )
+            if not resp.get("success"):
+                err = resp.get("error") or {}
+                code = err.get("code")
+                msg = err.get("msg") or "Failed to list files"
+                details = [f"folder_token: {folder_token}"]
+                if query:
+                    details.append(f"query: {query}")
+                if code is not None:
+                    details.append(f"code: {code}")
+                return f"# error: {msg}\n" + "\n".join(details)
+
+            data = resp.get("data") or {}
+            batch = data.get("files") or []
+            files.extend(batch)
+
+            has_more = data.get("has_more")
+            next_token = data.get("page_token")
+            if not has_more or not next_token or len(files) >= page_size:
+                break
+            page_token = next_token
+
+        # Format as Markdown with JSON payload
+        lines: List[str] = []
+        lines.append(f"# Drive files of ({len(files)}/{page_size})")
+        payload = []
+        for f in files[:page_size]:
+            payload.append({
+                "name": f.get("name"),
+                "type": f.get("type"),
+                "token": f.get("token"),
+                "parent_token": f.get("parent_token"),
+                "url": f.get("url")
+            })
+        import json as _json
+        try:
+            body = _json.dumps(payload, ensure_ascii=False, indent=2)
+        except Exception:
+            body = str(payload)
+        lines.append("```json")
+        lines.append(body)
+        lines.append("```")
+        return "\n".join(lines)
+
+    def delete_file_markdown(self, file_token: str, file_type: str) -> str:
+        """Delete a file and return a Markdown summary.
+        Intention: Move formatting out of main into the handle for reuse.
+        """
+        resp = self.delete_file(file_token, file_type)
+        if not resp.get("success"):
+            err = resp.get("error") or {}
+            code = err.get("code")
+            msg = err.get("msg") or "Failed to delete file"
+            details = [f"file_token: {file_token}", f"file_type: {file_type}"]
+            if code is not None:
+                details.append(f"code: {code}")
+            return f"# error: {msg}\n" + "\n".join(details)
+        lines = ["---", "# File Deleted", f"file_token: {file_token}", f"file_type: {file_type}"]
+        return "\n".join(lines)

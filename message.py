@@ -166,6 +166,62 @@ class MessageHandle(FeishuClient):
                 "error": f"Exception occurred: {str(e)}"
             }
 
+    def send_text_markdown(self, receive_id: str, content: str,
+                            msg_type: str = "text", receive_id_type: str = "email") -> str:
+        """Send text and return a Markdown summary.
+        Intention: Move formatting out of main into handle for reuse.
+        """
+        resp = self.send_text(receive_id, content, msg_type, receive_id_type)
+        if not resp.get("success"):
+            error_title = resp.get("error", "Failed to send text")
+            code = resp.get("code")
+            details = [f"receive_id: {receive_id}", f"receive_id_type: {receive_id_type}", f"msg_type: {msg_type}"]
+            if code is not None:
+                details.append(f"code: {code}")
+            return f"# error: {error_title}\n" + "\n".join(details)
+        lines = ["---", "# Message Sent", f"receive_id: {receive_id}", f"receive_id_type: {receive_id_type}", f"msg_type: {msg_type}"]
+        msg_id = resp.get("message_id") or resp.get("data", {}).get("message_id")
+        if msg_id:
+            lines.append(f"message_id: {msg_id}")
+        return "\n".join(lines)
+
+    def send_image_markdown(self, receive_id: str, image_path: str, receive_id_type: str = "email") -> str:
+        """Send image and return a Markdown summary.
+        Intention: Move formatting out of main into handle for reuse.
+        """
+        resp = self.send_image(receive_id, image_path, receive_id_type)
+        if not resp.get("success"):
+            error_title = resp.get("error", "Failed to send image")
+            code = resp.get("code")
+            details = [f"receive_id: {receive_id}", f"receive_id_type: {receive_id_type}", f"image_path: {image_path}"]
+            if code is not None:
+                details.append(f"code: {code}")
+            return f"# error: {error_title}\n" + "\n".join(details)
+        lines = ["---", "# Image Sent", f"receive_id: {receive_id}", f"receive_id_type: {receive_id_type}", f"image_path: {image_path}"]
+        image_key = resp.get("image_key") or resp.get("data", {}).get("image_key")
+        if image_key:
+            lines.append(f"image_key: {image_key}")
+        return "\n".join(lines)
+
+    def send_file_markdown(self, receive_id: str, file_path: str,
+                            receive_id_type: str = "email", file_type: str = "stream") -> str:
+        """Send file and return a Markdown summary.
+        Intention: Move formatting out of main into handle for reuse.
+        """
+        resp = self.send_file(receive_id, file_path, receive_id_type, file_type)
+        if not resp.get("success"):
+            error_title = resp.get("error", "Failed to send file")
+            code = resp.get("code")
+            details = [f"receive_id: {receive_id}", f"receive_id_type: {receive_id_type}", f"file_path: {file_path}", f"file_type: {file_type}"]
+            if code is not None:
+                details.append(f"code: {code}")
+            return f"# error: {error_title}\n" + "\n".join(details)
+        lines = ["---", "# File Sent", f"receive_id: {receive_id}", f"receive_id_type: {receive_id_type}", f"file_path: {file_path}", f"file_type: {file_type}"]
+        file_token = resp.get("file_token") or resp.get("data", {}).get("file_token")
+        if file_token:
+            lines.append(f"file_token: {file_token}")
+        return "\n".join(lines)
+
     def send_image(self, receive_id: str, image_path: str, 
                   receive_id_type: str = "email") -> Dict[str, Any]:
         """
