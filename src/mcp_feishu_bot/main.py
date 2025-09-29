@@ -9,7 +9,6 @@ Provides tools for sending messages, images, and files through Feishu API with a
 import os
 import atexit
 import warnings
-import json
 from typing import Optional
 
 # Additional runtime warning suppression as backup
@@ -25,20 +24,21 @@ from mcp_feishu_bot.bitable import BitableHandle
 mcp = FastMCP("Feishu MCP Server")
 
 # Initialize global Feishu clients
+chat_client: Optional[MessageHandle] = None
 drive_client: Optional[DriveHandle] = None
 feishu_client: Optional[FeishuClient] = None
-message_client: Optional[MessageHandle] = None
-bitable_client: Optional[BitableHandle] = None
+bitable_clients: Optional[dict[str, BitableHandle]] = {}
 
 def initialize_feishu_client() -> Optional[FeishuClient]:
     """
     Initialize Feishu clients with environment variables and start long connection.
     Returns None if required environment variables are not set.
     """
-    global feishu_client, message_client, bitable_client, drive_client
+    global feishu_client, chat_client, drive_client, bitable_clients 
     
     app_id = os.getenv("FEISHU_APP_ID")
     app_secret = os.getenv("FEISHU_APP_SECRET")
+    msg_server = os.getenv("FEISHU_MSG_SERVER")
     
     if not app_id or not app_secret:
         print("[Warning] FEISHU_APP_ID and FEISHU_APP_SECRET not configured")
@@ -49,19 +49,20 @@ def initialize_feishu_client() -> Optional[FeishuClient]:
         feishu_client = FeishuClient(app_id, app_secret)
         
         # Initialize specialized clients
-        message_client = MessageHandle(app_id, app_secret)
-        bitable_client = BitableHandle(app_id, app_secret)
+        chat_client = MessageHandle(app_id, app_secret)
         drive_client = DriveHandle(app_id, app_secret)
-        
+    except Exception as e:
+        print(f"[Error] Failed to initialize Feishu client: {str(e)}")
+        return None
+    
+    # Start long connection if enabled
+    if msg_server and msg_server.upper() == "ON":
         # Auto-start long connection when server initializes
         if feishu_client.start_long_connection():
             print("[Info] Feishu long connection started successfully")
         else:
             print("[Warning] Failed to start Feishu long connection")
-        return feishu_client
-    except Exception as e:
-        print(f"[Error] Failed to initialize Feishu client: {str(e)}")
-        return None
+    return feishu_client
 
 def cleanup_feishu_client():
     """
@@ -86,7 +87,7 @@ def main() -> None:
 @mcp.tool
 def chat_send_text(receive_id: str, content: str, receive_id_type: str = "email", msg_type: str = "text") -> str:
     """
-    Send a message to a Feishu user or group.
+    [Feishu/Lark] Send a message to a user or group.
     
     Args:
         receive_id: The ID of the message receiver (user_id, open_id, union_id, email, or chat_id)
@@ -97,18 +98,18 @@ def chat_send_text(receive_id: str, content: str, receive_id_type: str = "email"
     Returns:
         Markdown string containing the result of the message sending operation
     """
-    global message_client
+    global chat_client
     
-    if not message_client:
+    if not chat_client:
         return "# error: Feishu client not configured\nPlease set FEISHU_APP_ID and FEISHU_APP_SECRET environment variables."
     
-    return message_client.send_text_markdown(receive_id, content, msg_type, receive_id_type)
+    return chat_client.send_text_markdown(receive_id, content, msg_type, receive_id_type)
 
 
 @mcp.tool
 def chat_send_image(receive_id: str, image_path: str, receive_id_type: str = "email") -> str:
     """
-    Send an image to a Feishu user or group.
+    [Feishu/Lark] Send an image to a user or group.
     
     Args:
         receive_id: The ID of the message receiver
@@ -118,18 +119,18 @@ def chat_send_image(receive_id: str, image_path: str, receive_id_type: str = "em
     Returns:
         Markdown string containing the result of the image sending operation
     """
-    global message_client
+    global chat_client
     
-    if not message_client:
+    if not chat_client:
         return "# error: Feishu client not configured\nPlease set FEISHU_APP_ID and FEISHU_APP_SECRET environment variables."
     
-    return message_client.send_image_markdown(receive_id, image_path, receive_id_type)
+    return chat_client.send_image_markdown(receive_id, image_path, receive_id_type)
 
 
 @mcp.tool
 def chat_send_file(receive_id: str, file_path: str, receive_id_type: str = "email", file_type: str = "stream") -> str:
     """
-    Send a file to a Feishu user or group.
+    [Feishu/Lark] Send a file to a Feishu user or group.
     
     Args:
         receive_id: The ID of the message receiver
@@ -140,18 +141,18 @@ def chat_send_file(receive_id: str, file_path: str, receive_id_type: str = "emai
     Returns:
         Markdown string containing the result of the file sending operation
     """
-    global message_client
+    global chat_client
     
-    if not message_client:
+    if not chat_client:
         return "# error: Feishu client not configured\nPlease set FEISHU_APP_ID and FEISHU_APP_SECRET environment variables."
     
-    return message_client.send_file_markdown(receive_id, file_path, receive_id_type, file_type)
+    return chat_client.send_file_markdown(receive_id, file_path, receive_id_type, file_type)
 
 
 @mcp.tool
-def bitable_list_tables(app_token: str, page_size: int = 20) -> str:
+def bitable_list_tables(app_token: str, page_size: int = 50) -> str:
     """
-    List all tables in a Feishu Bitable app and return Markdown describing
+    [Feishu/Lark] List all tables in a Bitable app and return Markdown describing
     each table and its fields.
     
     Args:
@@ -162,44 +163,89 @@ def bitable_list_tables(app_token: str, page_size: int = 20) -> str:
         Markdown string containing the description of tables and fields
     """
     # Delegate to BitableHandle which encapsulates the Markdown generation
-    bitable_handle = BitableHandle(app_token)
-    return bitable_handle.describe_tables_markdown(page_size)
+    if app_token not in bitable_clients:
+        bitable_clients[app_token] = BitableHandle(app_token)
+    bitable_handle = bitable_clients[app_token]
+    return bitable_handle.describe_tables(page_size)
 
 
 @mcp.tool
-def bitable_list_records(app_token: str, table_id: str, options: dict) -> str:
+def bitable_list_records(app_token: str, table_id: str, options: dict = None) -> str:
     """
-    List records in a Feishu Bitable table.
+    [Feishu/Lark] List records in a Bitable table.
     
     Args:
         app_token: The token of the bitable app
         table_id: The ID of the table
-        page_size: Number of records to return per page (default: 20)
+        options: Dictionary of pagination and query options (default: None)
         
     Returns:
         Markdown string containing the list of records
     """
-    global bitable_client
-    
-    if not bitable_client:
-        return "# error: Feishu client not configured\nPlease set FEISHU_APP_ID and FEISHU_APP_SECRET environment variables."
-    
-    # Create a new BitableHandle instance with the specific app_token and table_id
-    bitable_handle = BitableHandle(app_token, table_id)
+    global bitable_clients
 
+    if app_token not in bitable_clients:
+        bitable_clients[app_token] = BitableHandle(app_token)
+    bitable_handle = bitable_clients[app_token].use_table(table_id)
     # Parse options for pagination and query
     page_size = int(options.get("page_size", 20))
     page_index = int(options.get("page_index", 1))
     query = options.get("query", {}) or {}
 
     # Always return JSON-style per-record sections; formatting handled in bitable.py
-    return bitable_handle.describe_records_markdown(page_size=page_size, page_index=page_index, query=query)
-
+    return bitable_handle.describe_list_records(page_size=page_size, page_index=page_index, query=query)
 
 @mcp.tool
-def bitable_query_record(app_token: str, table_id: str, record_id: str) -> str:
+def bitable_query_records(app_token: str, table_id: str, query: dict, options: dict = None) -> str:
     """
-    Get a specific record from a Feishu Bitable table.
+    [Feishu/Lark] Query records in a Bitable table with simplified field-based filtering.
+    
+    Args:
+        app_token: The token of the bitable app
+        table_id: The ID of the table
+        query: Simple query object with field names as keys and values/arrays as values. Format:
+            {
+                "field_name1": "single_value",
+                "field_name2": ["value1", "value2"],  # Array for multiple values
+                "field_name3": ["record_id"]  # Record references
+            }
+        options: Dictionary of additional options (default: None)
+            - sorts: List of sort conditions [{"field_name": "name", "desc": false}]
+            - page_size: Number of records per page (max 100, default 20)
+            - page_token: Token for pagination
+        
+    Returns:
+        Markdown string containing the query results
+    """
+    global bitable_clients
+    
+    if not feishu_client:
+        return "# error: Feishu client not configured\nPlease set FEISHU_APP_ID and FEISHU_APP_SECRET environment variables."
+    
+    # Create or get BitableHandle instance for the app_token
+    if app_token not in bitable_clients:
+        bitable_clients[app_token] = BitableHandle(app_token)
+    
+    bitable_handle = bitable_clients[app_token].use_table(table_id)
+    
+    # Parse options
+    options = options or {}
+    sorts = options.get("sorts")
+    page_size = int(options.get("page_size", 20))
+    page_token = options.get("page_token")
+    
+    # Delegate to BitableHandle which encapsulates the query logic and Markdown generation
+    return bitable_handle.describe_query_records(
+        query=query,
+        sorts=sorts,
+        page_size=page_size,
+        page_token=page_token
+    )
+
+@mcp.tool
+def bitable_find_record(app_token: str, table_id: str, record_id: str) -> str:
+    """
+    [Feishu/Lark] Get a specific record from a Bitable table.
     
     Args:
         app_token: The token of the bitable app
@@ -209,50 +255,46 @@ def bitable_query_record(app_token: str, table_id: str, record_id: str) -> str:
     Returns:
         Markdown string containing the record information
     """
-    global bitable_client
+    global bitable_clients
     
-    if not bitable_client:
+    if not feishu_client:
         return "# error: Feishu client not configured\nPlease set FEISHU_APP_ID and FEISHU_APP_SECRET environment variables."
     
-    # Create a new BitableHandle instance with the specific app_token and table_id
-    bitable_handle = BitableHandle(app_token, table_id)
-    return bitable_handle.describe_record_markdown(record_id)
+    # Create or get BitableHandle instance for the app_token
+    if app_token not in bitable_clients:
+        bitable_clients[app_token] = BitableHandle(app_token)
+    
+    bitable_handle = bitable_clients[app_token].use_table(table_id)
+    return bitable_handle.describe_query_record(record_id)
 
 
 @mcp.tool
 def bitable_upsert_record(app_token: str, table_id: str, fields: dict) -> str:
     """
-    Update an existing record in a Feishu Bitable table, returning Markdown.
-    The record_id must be provided inside the fields. If the record does not exist, return an error.
+    [Feishu/Lark] Upsert a record in a Bitable table, returning Markdown.
+    Uses enhanced field processing to handle related fields automatically.
+    
+    Logic:
+    1. If record_id is provided, use update logic
+    2. If no record_id, use auto_number field to match existing record
+    3. For related fields, match records in related tables using auto_number field, create if not found
 
     Args:
         app_token: The token of the bitable app
         table_id: The ID of the table
-        fields: Dictionary of field values to update; MUST include 'record_id'
+        fields: Dictionary of field values; may include 'record_id' for direct update
         
     Returns:
-        Markdown string describing the update result or the error
+        Markdown string describing the upsert result or the error
     """
-    global bitable_client
-    
-    if not bitable_client:
-        return "# error: Feishu client not configured\nPlease set FEISHU_APP_ID and FEISHU_APP_SECRET environment variables."
-
-    # Validate record_id inside fields
-    record_id = fields.get("record_id")
-    if not record_id:
-        return f"# error: missing record_id\ntable_id: {table_id}"
-
-    # Prepare update fields (do not send record_id as a field to API)
-    update_fields = {k: v for k, v in fields.items() if k != "record_id"}
     bitable_handle = BitableHandle(app_token, table_id)
-    return bitable_handle.update_record_markdown(record_id, update_fields)
+    return bitable_handle.describe_upsert_record(fields)
 
 
 @mcp.tool
 def drive_query_files(folder_token: str = "", options: dict = None) -> str:
     """
-    List files in a Feishu Drive folder and return Markdown.
+    [Feishu/Lark] List files in a Drive folder and return Markdown.
     Options dict follows bitable_list_records style: supports page_size, page_index, order_by, direction, user_id_type, and query for multi-condition matching.
     
     Args:
@@ -278,7 +320,7 @@ def drive_query_files(folder_token: str = "", options: dict = None) -> str:
 @mcp.tool
 def drive_delete_file(file_token: str, file_type: str) -> str:
     """
-    Delete a file or folder in Feishu Drive
+    [Feishu/Lark] Delete a file or folder in Feishu Drive
     
     Args:
         file_token: Token of the file or folder to delete
@@ -291,7 +333,6 @@ def drive_delete_file(file_token: str, file_type: str) -> str:
         return "# error: Feishu client not configured\nPlease set FEISHU_APP_ID and FEISHU_APP_SECRET environment variables."
     
     return drive_client.delete_file_markdown(file_token, file_type)
-
 
 if __name__ == "__main__":
     # Allow direct execution via python -m or script run
