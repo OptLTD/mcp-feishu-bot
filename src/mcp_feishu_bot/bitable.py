@@ -26,8 +26,12 @@ from lark_oapi.api.bitable.v1 import (
     CreateAppTableFieldRequest,
     UpdateAppTableFieldRequest,
     DeleteAppTableFieldRequest,
+    ListAppTableRecordResponse,
     CreateAppTableRecordResponse,
     SearchAppTableRecordResponse,
+    UpdateAppTableRecordResponse,
+    DeleteAppTableRecordResponse,
+    GetAppTableRecordResponse,
 )
 
 from mcp_feishu_bot.client import FeishuClient
@@ -297,43 +301,14 @@ class BitableHandle(FeishuClient):
         Returns:
             Markdown string containing the description of tables and fields
         """
-        
-        # Map field type codes to human-readable names (best-effort)
-        # Note: Mapping is not exhaustive and can be extended based on API docs.
-        type_map = {
-            1: "文本",
-            2: "数字",
-            3: "单选",
-            4: "多选",
-            5: "日期",
-            6: "复选框",
-            7: "用户",
-            8: "附件",
-            9: "公式",
-            10: "序列号",
-            11: "链接",
-            12: "邮件",
-            13: "电话",
-            14: "时间",
-            17: "附件",
-            18: "关联表",
-            19: "查找",
-            1005: "编号"
-        }
-
+        # clear cache data
+        self._cached_views = {}
+        self._cached_fields = {}
+        self._cached_tables = None
         markdown_sections: list[str] = []
-
-        # Utility: safely access properties that may be dicts or SDK objects
-        # Purpose: Avoid AttributeError when property is not a plain dict
-        def safe_get(obj: Any, key: str) -> Any:
-            if isinstance(obj, dict):
-                return obj.get(key)
-            return getattr(obj, key, None)
-
         # Fetch all tables using pagination and cache them
         try:
             tables = self.get_cached_tables(page_size)
-            self._cached_tables = tables
         except Exception as e:
             return f"# error: {str(e)}"
 
@@ -352,63 +327,144 @@ class BitableHandle(FeishuClient):
             section_lines.append("|---|---|---|")
 
             # Fetch all fields with pagination
+            # fields data type: List[AppTableField]
             fields = self.get_cached_fields(table_id) or []
             for f in fields:
                 fname = f.field_name or ""
-                ftype_code = f.type
-                prop = f.property or {}
-                # Determine a human-readable type label with best-effort heuristics
-                base_label = type_map.get(ftype_code)
-                rel_table_id_hint = safe_get(prop, "tableId") or safe_get(prop, "table_id")
-                options_hint = safe_get(prop, "options")
-                if base_label is None:
-                    if rel_table_id_hint:
-                        # Relation/lookup type without a known mapping
-                        ftype = f"关联表({ftype_code})"
-                    elif isinstance(options_hint, list):
-                        # Select-type field without a known mapping
-                        ftype = f"选择({ftype_code})"
-                    else:
-                        ftype = str(ftype_code)
-                else:
-                    ftype = base_label
-
-                # Build extra metadata about the field
-                extra_parts: List[str] = []
-
-                # If options present (for single/multi select), use first option name as sample
-                # Use safe_get because property may be an SDK object rather than a dict
-                options = options_hint
-                if isinstance(options, list) and options:
-                    option_names = [o.get("name") or o.get("text") or "" for o in options if isinstance(o, dict)]
-                    if option_names:
-                        extra_parts.append("选项：" + "、".join([n for n in option_names if n]))
-
-                # If description present, add to extra
-                desc = f.description
-                if desc:
-                    extra_parts.append(f"说明：{desc}")
-
-                # Some sequence number fields may have prefix/format settings in property
-                prefix = safe_get(prop, "prefix") or safe_get(prop, "format_prefix")
-                if prefix:
-                    extra_parts.append(f"前缀：{prefix}")
-
-                # If relation/lookup properties exist, try to include minimal info
-                rel_table_id = rel_table_id_hint
-                if rel_table_id:
-                    extra_parts.append(f"关联表：{rel_table_id}")
-
-                extra = "；".join(extra_parts) if extra_parts else "无"
-                section_lines.append(f"|{fname}|{ftype}|{extra}|")
+                # Build type label and concise extra summary via helper
+                ftype, extra_summary = self._summarize_field_extra(f)
+                section_lines.append(f"|{fname}|{ftype}|{extra_summary}|")
 
             markdown_sections.append("\n".join(section_lines))
 
         return "\n\n".join(markdown_sections)
+
+    def _summarize_field_extra(self, field: AppTableField) -> Tuple[str, str]:
+        """
+        Generate a human-readable type label and concise extra summary.
+        Only keeps key info per type to avoid bloated output.
+        """
+        # Safe get for dict/SDK objects
+        def sg(obj: Any, key: str) -> Any:
+            if isinstance(obj, dict):
+                return obj.get(key)
+            return getattr(obj, key, None)
+
+        code = getattr(field, 'type', None)
+        prop = getattr(field, 'property', {}) or {}
+
+        # Determine a human-readable type label with best-effort heuristics
+        type_map = {
+            1: "文本",
+            2: "数字",
+            3: "单选",
+            4: "多选",
+            5: "日期",
+            7: "复选框",
+            11: "人员",
+            13: "电话号码",
+            15: "超链接",
+            17: "附件",
+            18: "单项关联",
+            19: "查找",
+            20: "公式（不支持设置公式表达式）",
+            21: "双向关联",
+            22: "地理位置",
+            23: "群组",
+            1001: "创建时间",
+            1002: "最后更新时间",
+            1003: "创建人",
+            1004: "修改人",
+            1005: "自动编号",
+        }
+        base_label = type_map.get(code)
+        rel_table_id_hint = sg(prop, "tableId") or sg(prop, "table_id")
+        options_hint = sg(prop, "options")
+        if base_label is None:
+            if rel_table_id_hint:
+                # Relation/lookup type without a known mapping
+                ftype = f"关联表({code})"
+            elif isinstance(options_hint, list):
+                # Select-type field without a known mapping
+                ftype = f"选择({code})"
+            else:
+                ftype = str(code)
+        else:
+            ftype = base_label
+
+        # Single/Multi Select
+        if code in (3, 4):
+            options = sg(prop, 'options')
+            if isinstance(options, list) and options:
+                names: List[str] = []
+                for o in options:
+                    if isinstance(o, dict):
+                        name = o.get('name') or o.get('text')
+                    else:
+                        name = sg(o, 'name') or sg(o, 'text')
+                    if name:
+                        names.append(name)
+                if names:
+                    more = ''
+                    if len(names) > 5:
+                        names = names[:5]
+                        more = '等'
+                    return ftype, '选项：' + '、'.join(names) + more
+
+        # Date/DateTime
+        if code == 5:
+            fmt = sg(prop, 'date_formatter')
+            auto = sg(prop, 'auto_fill')
+            parts: List[str] = []
+            if fmt:
+                parts.append(f'日期格式：{fmt}')
+            if auto is True:
+                parts.append('自动填充：是')
+            return ftype, ('；'.join(parts) if parts else '无')
+
+        # 数字/金额
+        if code == 2:
+            fmt = sg(prop, 'formatter')
+            cur = sg(prop, 'currency_code')
+            parts: List[str] = []
+            if cur:
+                parts.append(f'币种：{cur}')
+            if fmt:
+                parts.append(f'格式：{fmt}')
+            return ftype, ('；'.join(parts) if parts else '无')
+
+        # 自动编号
+        if code in (10, 1005):
+            prefix = sg(prop, 'prefix') or sg(prop, 'format_prefix')
+            return ftype, (f'前缀：{prefix}' if prefix else '无')
+
+        # 关联（单项/双向）
+        if code in (18, 21):
+            table_name = sg(prop, 'table_name') or sg(prop, 'tableName')
+            table_id = sg(prop, 'table_id') or sg(prop, 'tableId')
+            multiple = sg(prop, 'multiple')
+            base = table_name or table_id
+            parts: List[str] = []
+            if base:
+                parts.append(f'关联表：{base}')
+            if isinstance(multiple, bool):
+                parts.append(f'多选：{"是" if multiple else "否"}')
+            return ftype, ('；'.join(parts) if parts else '无')
+
+        # 查找（保留 19 兼容）
+        if code == 19:
+            target_field = sg(prop, 'target_field')
+            if target_field:
+                return ftype, f'目标字段：{target_field}'
+            return ftype, '查找'
+
+        # Default: use description if available, otherwise '无'
+        desc = getattr(field, 'description', None)
+        return ftype, (f'说明：{desc}' if desc else '无')
     
     def handle_list_records(self, page_size: int = 20, page_token: str = None,
                     view_id: str = None, filter_condition: str = None,
-                    sort: List[str] = None) -> Dict[str, Any]:
+                    sort: List[str] = None) -> ListAppTableRecordResponse:
         """
         List records in a table
         
@@ -420,243 +476,144 @@ class BitableHandle(FeishuClient):
             sort: List of sort conditions
             
         Returns:
-            Dictionary containing the list of records
+            Raw SDK response object
         """
-        if not self.table_id:
-            return {
-                "success": False,
-                "error": "table_id is required"
-            }
-            
-        try:
-            request = ListAppTableRecordRequest.builder() \
-                .app_token(self.app_token) \
-                .table_id(self.table_id) \
-                .page_size(page_size)
-            
-            if page_token:
-                request = request.page_token(page_token)
-            if view_id:
-                request = request.view_id(view_id)
-            if filter_condition:
-                request = request.filter(filter_condition)
-            if sort:
-                request = request.sort(sort)
-                
-            request = request.build()
-            
-            response = self.http_client.bitable.v1.app_table_record.list(request)
-            
-            if response.success():
-                return {
-                    "success": True,
-                    "records": [
-                        {
-                            "record_id": record.record_id,
-                            "fields": record.fields,
-                            "created_by": record.created_by,
-                            "created_time": record.created_time,
-                            "last_modified_by": record.last_modified_by,
-                            "last_modified_time": record.last_modified_time
-                        } for record in response.data.items
-                    ],
-                    "has_more": response.data.has_more,
-                    "page_token": response.data.page_token,
-                    "total": response.data.total
-                }
-            else:
-                return {
-                    "success": False,
-                    "error": f"Failed to list records: {response.msg}",
-                    "code": response.code
-                }
-                
-        except Exception as e:
-            return {
-                "success": False,
-                "error": f"Exception occurred: {str(e)}"
-            }
+        request = ListAppTableRecordRequest.builder() \
+            .app_token(self.app_token) \
+            .table_id(self.table_id) \
+            .page_size(page_size)
+
+        if page_token:
+            request = request.page_token(page_token)
+        if view_id:
+            request = request.view_id(view_id)
+        if filter_condition:
+            request = request.filter(filter_condition)
+        if sort:
+            request = request.sort(sort)
+
+        request = request.build()
+
+        return self.http_client.bitable.v1.app_table_record.list(request)
 
     def describe_list_records(self, page_size: int = 20, page_token: str = None) -> str:
         """
-        Generate Markdown that lists records with expanded (human-readable) field values.
-        Always returns per-record JSON sections and uses header style:
-        "# Table {table_name} records"
-
-        Args:
-            page_size: Number of records per page
-            page_token: Token for pagination
-
-        Returns:
-            Markdown string containing records in JSON sections
+        列出记录并返回 Markdown 文本。保留分页信息与错误详情。
         """
-        # Validate required table_id
         if not self.table_id:
             return "# error: table_id is required"
 
-        # Resolve table name for nicer header; fallback to table_id
-        table_name = self.table_id
         try:
-            tables_meta = self.get_cached_tables(page_size=200)
-            if tables_meta and tables_meta.get("success"):
-                for t in tables_meta.get("items", []) or []:
-                    if t.get("table_id") == self.table_id:
-                        tn = t.get("name")
-                        if tn:
-                            table_name = tn
-                            break
-        except Exception:
-            pass
+            resp = self.handle_list_records(page_size=page_size, page_token=page_token)
+        except Exception as e:
+            return f"# error: {str(e)}\npage_size: {page_size}"
 
-        # Navigate to requested page using page_token iteration
-        page_token = None
-        # Fetch the target page
-        resp = self.handle_list_records(page_size=page_size, page_token=page_token)
-        if not resp.get("success"):
-            error_title = resp.get("error", "Failed to list records")
-            code = resp.get("code")
-            details = [f"table_id: {self.table_id}", f"page_size: {page_size}"]
-            if code is not None:
-                details.append(f"code: {code}")
-            return f"# error: {error_title}\n" + "\n".join(details)
+        if not resp.success():
+            # 尝试提取 SDK 错误详情
+            msg = getattr(resp, 'msg', None)
+            error = getattr(resp, 'error', None)
+            return f"# error: {msg}:\n{error}"
 
-        records = resp.get("records", [])
-
-        # Build Markdown output with requested header style and per-record JSON sections
-        lines: List[str] = []
-        lines.append(f"# Table {table_name} records")
-        lines.append("")
-        for r in records:
-            rid = r.get("record_id")
-            # Normalize field values to JSON-friendly structures
-            flat_fields = {k: self._normalize_json_value(v) for k, v in (r.get("fields", {}) or {}).items()}
-            lines.append(f"## record_id:{rid}")
-            try:
-                body = json.dumps(flat_fields, ensure_ascii=False, indent=2)
-            except Exception:
-                body = str(flat_fields)
-            lines.append("```json")
-            lines.append(body)
-            lines.append("```")
+        items = getattr(resp.data, 'items', []) if getattr(resp, 'data', None) else []
+        lines = ["# Records", ""]
+        for rec in items or []:
+            record_id = getattr(rec, 'record_id', '')
+            fields = getattr(rec, 'fields', {}) or {}
+            lines.append(f"## record_id: {record_id}")
+            for k, v in (fields.items() if isinstance(fields, dict) else []):
+                lines.append(f"- {k}: {self._normalize_json_value(v)}")
             lines.append("")
 
-        if not records:
-            lines.append("")
-            lines.append("No records matched the query conditions.")
+        # 分页信息
+        if getattr(resp.data, 'has_more', False):
+            lines.append(f"has_more: {resp.data.has_more}")
+            if getattr(resp.data, 'page_token', None):
+                lines.append(f"next_page_token: {resp.data.page_token}")
 
         return "\n".join(lines)
 
 
-    def describe_query_records(self, query: Dict[str, Any], 
+    def describe_search_records(self, query: Dict[str, Any], 
                               sorts: List[Dict[str, Any]] = None,
                               page_size: int = 20,
                               page_token: str = None) -> str:
         """
-        Query records with simplified field-based filtering and return formatted Markdown results.
-        
-        Args:
-            query: Simple query object with field names as keys and values/arrays as values
-            sorts: List of sort conditions (optional)
-            page_size: Number of records per page (max 100, default 20)
-            page_token: Token for pagination (optional)
-            
-        Returns:
-            Markdown string containing the query results
+        搜索记录并返回 Markdown 文本。支持简化查询、排序与分页，保留错误详情。
         """
         if not self.table_id:
             return "# error: table_id is required"
-        
+        if not query or len(query) == 0:
+            return "# error: query cannot empty"
+
+        filters = self._convert_to_filter(query or {})
         try:
-            # Convert simple query format to complex filter conditions
-            filter_conditions = self._convert_to_filter(query)
-            
-            # Use the search_records method for advanced querying
-            response = self.handle_search_records(
-                filter=filter_conditions,
-                field_names=None,  # Include all fields
-                sorts=sorts,
-                page_size=page_size,
-                page_token=page_token,
-                user_id_type="open_id"  # Use default user_id_type
+            resp = self.handle_search_records(
+                filter=filters, page_size=page_size, page_token=page_token,
+                field_names=None, sorts=sorts, user_id_type="open_id"
             )
-            
-            if not response.success():
-                return f"# error: Query failed\n{response.msg}"
-            
-            # Format the response as Markdown
-            data = response.data
-            records = data.items or []
-            
-            # Build Markdown output
-            lines = []
-            lines.append(f"# Query Results for Table {self.table_id}")
-            lines.append("")
-            lines.append(f"**Total Records:** {data.total}")
-            if data.has_more:
-                lines.append(f"**Has More:** Yes (use page_token: {data.page_token})")
-            else:
-                lines.append("**Has More:** No")
-            lines.append("")
-            
-            if not records:
-                lines.append("No records found matching the query conditions.")
-            else:
-                for record in records:
-                    record_id = record.record_id
-                    fields = record.fields or {}
-                    
-                    lines.append(f"## record_id: {record_id}")
-                    
-                    # Convert fields to JSON format for better readability
-                    try:
-                        # Normalize field values similar to describe_records
-                        normalized_fields = {k: self._normalize_json_value(v) for k, v in fields.items()}
-                        json_content = json.dumps(normalized_fields, ensure_ascii=False, indent=2)
-                        lines.append("```json")
-                        lines.append(json_content)
-                        lines.append("```")
-                    except Exception:
-                        # Fallback to string representation
-                        lines.append("```")
-                        for field_name, field_value in fields.items():
-                            lines.append(f"{field_name}: {field_value}")
-                        lines.append("```")
-                    
-                    lines.append("")
-            
-            return "\n".join(lines)
-            
         except Exception as e:
-            return f"# error: Exception occurred during query\n{str(e)}"
+            return f"# error: {str(e)}\nquery: {json.dumps(query, ensure_ascii=False)}"
+
+        if not resp.success():
+            # 尝试提取 SDK 错误详情
+            msg = getattr(resp, 'msg', None)
+            error = getattr(resp, 'error', None)
+            return f"# error: {msg}:\n{error}\nquery: {json.dumps(query, ensure_ascii=False)}"
+
+        items = getattr(resp.data, 'items', []) if getattr(resp, 'data', None) else []
+        lines = ["# Search Results", ""]
+        for rec in items or []:
+            record_id = getattr(rec, 'record_id', '')
+            fields = getattr(rec, 'fields', {}) or {}
+            lines.append(f"## record_id: {record_id}")
+            for k, v in (fields.items() if isinstance(fields, dict) else []):
+                lines.append(f"- {k}: {self._normalize_json_value(v)}")
+            lines.append("")
+
+        # 分页信息
+        if getattr(resp.data, 'has_more', False):
+            lines.append(f"has_more: {resp.data.has_more}")
+            if getattr(resp.data, 'page_token', None):
+                lines.append(f"next_page_token: {resp.data.page_token}")
+
+        return "\n".join(lines)
 
     def describe_upsert_record(self, fields: Dict[str, Any]) -> str:
         """
-        Upsert a record with enhanced field processing and return Markdown summary.
-        
-        Logic:
-        1. If record_id is provided, use update logic
-        2. If no record_id, use auto_number field to match existing record
-        3. For related fields, match records in related tables using auto_number field, create if not found
-        
-        Args:
-            fields: Dictionary of field values; may include 'record_id' for direct update
-            
-        Returns:
-            Markdown string describing the upsert result or error
+        Upsert 记录并返回 Markdown 文本。根据是否存在 record_id 或索引字段决定更新或创建。
         """
         if not self.table_id:
             return "# error: table_id is required"
-        
+        if not fields:
+            return "# error: fields is required"
+
+        # 预处理字段（解析关联表、索引匹配等）
+        record_id, processed = self._process_fields(fields)
         try:
-            # Process fields and search for existing record
-            record_id, processed_data = self._process_fields(fields)
             if record_id:
-                return self.describe_update_record(record_id, processed_data)
+                resp = self.handle_update_record(record_id, processed)
+                action = "update"
             else:
-                return self.describe_create_record(processed_data)
-                
+                resp = self.handle_create_record(processed)
+                action = "create"
         except Exception as e:
-            return f"# error: Failed to upsert record\n{str(e)}\ntable_id: {self.table_id}"
+            return f"# error: {str(e)}"
+
+        if not resp.success():
+            # 尝试提取 SDK 错误详情
+            msg = getattr(resp, 'msg', None)
+            error = getattr(resp, 'error', None)
+            return f"# error: {msg}:\n{error}"
+
+        rid = record_id
+        if not rid:
+            rec = getattr(getattr(resp, 'data', None), 'record', None)
+            rid = getattr(rec, 'record_id', '') if rec else ''
+
+        lines = [f"# {action}d record_id: {rid}", ""]
+        for k, v in (processed.items() if isinstance(processed, dict) else []):
+            lines.append(f"- {k}: {self._normalize_json_value(v)}")
+        return "\n".join(lines)
 
     def _normalize_json_value(self, v):
         """Normalize field values to JSON-friendly structures across methods.
@@ -733,113 +690,87 @@ class BitableHandle(FeishuClient):
         return str(v) if v is not None else ""
 
     def describe_query_record(self, record_id: str) -> str:
-        """Describe a single record in JSON style with header and normalized fields.
-        Intention: Provide consistent per-record JSON output similar to list view.
         """
-        if not self.table_id:
-            return "# error: table_id is required"
-
-        resp = self.handle_query_record(record_id)
-        if not resp.get("success"):
-            error_title = resp.get("error", "Failed to query record")
-            code = resp.get("code")
-            details = [f"table_id: {self.table_id}", f"record_id: {record_id}"]
-            if code is not None:
-                details.append(f"code: {code}")
-            return f"# error: {error_title}\n" + "\n".join(details)
-
-        fields = resp.get("fields", {}) or {}
-        flat_fields = {k: self._normalize_json_value(v) for k, v in fields.items()}
-        lines: List[str] = []
-        lines.append(f"## record_id:{record_id}")
-        try:
-            body = json.dumps(flat_fields, ensure_ascii=False, indent=2)
-        except Exception:
-            body = str(flat_fields)
-        lines.append("```json")
-        lines.append(body)
-        lines.append("```")
-        return "\n".join(lines)
-
-    def describe_update_record(self, record_id: str, update_fields: Dict[str, Any]) -> str:
-        """Update a record and return a Markdown summary in JSON style.
-        Intention: Move update logic and formatting out of main.py and keep output consistent.
+        获取单条记录并返回 Markdown 文本，包含字段详情与错误信息。
         """
         if not self.table_id:
             return "# error: table_id is required"
         if not record_id:
-            return f"# error: missing record_id\ntable_id: {self.table_id}"
-        if not update_fields:
-            return f"# error: no fields to update\nrecord_id: {record_id}\ntable_id: {self.table_id}"
+            return "# error: record_id is required"
 
-        existing = self.handle_query_record(record_id)
-        if not existing.get("success"):
-            code = existing.get("code")
-            details = [f"table_id: {self.table_id}", f"record_id: {record_id}"]
-            if code is not None:
-                details.append(f"code: {code}")
-            return "# error: record not found\n" + "\n".join(details)
-
-        resp = self.handle_update_record(record_id, update_fields)
-        if not resp.get("success"):
-            error_title = resp.get("error", "Failed to update record")
-            code = resp.get("code")
-            details = [f"table_id: {self.table_id}", f"record_id: {record_id}"]
-            if code is not None:
-                details.append(f"code: {code}")
-            return f"# error: {error_title}\n" + "\n".join(details)
-
-        # Show only the updated fields, normalized
-        flat_fields = {k: self._normalize_json_value(v) for k, v in (update_fields or {}).items()}
-        lines: List[str] = []
-        lines.append(f"## record_id:{record_id}")
         try:
-            body = json.dumps(flat_fields, ensure_ascii=False, indent=2)
-        except Exception:
-            body = str(flat_fields)
-        lines.append("```json")
-        lines.append(body)
-        lines.append("```")
+            resp = self.handle_query_record(record_id)
+        except Exception as e:
+            return f"# error: {str(e)}\nrecord_id: {record_id}"
+
+        if not resp.success():
+            # 尝试提取 SDK 错误详情
+            msg = getattr(resp, 'msg', None)
+            error = getattr(resp, 'error', None)
+            return f"# error: {msg}:\n{error}\nrecord_id: {record_id}"
+
+        rec = getattr(getattr(resp, 'data', None), 'record', None)
+        if not rec:
+            return f"# Not found\nrecord_id: {record_id}"
+
+        lines = [f"# record_id: {getattr(rec, 'record_id', '')}", ""]
+        fields = getattr(rec, 'fields', {}) or {}
+        for k, v in (fields.items() if isinstance(fields, dict) else []):
+            lines.append(f"- {k}: {self._normalize_json_value(v)}")
+        return "\n".join(lines)
+
+    def describe_update_record(self, record_id: str, update_fields: Dict[str, Any]) -> str:
+        """
+        更新记录并返回 Markdown 文本，包含更新字段与错误详情。
+        """
+        if not self.table_id:
+            return "# error: table_id is required"
+        if not record_id:
+            return "# error: record_id is required"
+        if not update_fields:
+            return "# error: no fields to update"
+
+        try:
+            resp = self.handle_update_record(record_id, update_fields)
+        except Exception as e:
+            return f"# error: {str(e)}\nrecord_id: {record_id}"
+
+        if not resp.success():
+            # 尝试提取 SDK 错误详情
+            msg = getattr(resp, 'msg', None)
+            error = getattr(resp, 'error', None)
+            return f"# error: {msg}:\n{error}\nrecord_id: {record_id}"
+
+        lines = [f"# Updated record_id: {record_id}", ""]
+        for k, v in update_fields.items():
+            lines.append(f"- {k}: {self._normalize_json_value(v)}")
         return "\n".join(lines)
     
     def describe_create_record(self, fields: Dict[str, Any]) -> str:
-        """Create a new record and return a Markdown summary in JSON style.
-        Intention: Provide consistent formatting for record creation similar to update_record_markdown.
+        """
+        创建记录并返回 Markdown 文本，包含字段与错误详情。
         """
         if not self.table_id:
             return "# error: table_id is required"
         if not fields:
-            return f"# error: no fields to create\ntable_id: {self.table_id}"
+            return "# error: no fields to create"
 
-        resp = self.handle_create_record(fields)
-        # Debug: Log response object type and structure
-        if not resp.success():
-            logger.error(f"create_record failed - msg: {resp.msg}, code: {resp.code}")
-        
-        # Handle CreateAppTableRecordResponse object properly
-        if not resp.success():
-            error_title = resp.msg or "Failed to create record"
-            code = resp.code
-            details = [f"table_id: {self.table_id}"]
-            if code is not None:
-                details.append(f"code: {code}")
-            return f"# error: {error_title}\n" + "\n".join(details)
-
-        # Extract record information from SDK response
-        record = resp.data.record
-        record_id = record.record_id
-        created_fields = record.fields or {}
-        flat_fields = {k: self._normalize_json_value(v) for k, v in created_fields.items()}
-        lines: List[str] = []
-        lines.append(f"# Created new record")
-        lines.append(f"## record_id:{record_id}")
         try:
-            body = json.dumps(flat_fields, ensure_ascii=False, indent=2)
-        except Exception:
-            body = str(flat_fields)
-        lines.append("```json")
-        lines.append(body)
-        lines.append("```")
+            resp = self.handle_create_record(fields)
+        except Exception as e:
+            return f"# error: {str(e)}"
+
+        if not resp.success():
+            # 尝试提取 SDK 错误详情
+            msg = getattr(resp, 'msg', None)
+            error = getattr(resp, 'error', None)
+            return f"# error: {msg}:\n{error}"
+
+        record = getattr(getattr(resp, 'data', None), 'record', None)
+        rid = getattr(record, 'record_id', '') if record else ''
+        lines = [f"# Created record_id: {rid}", ""]
+        for k, v in fields.items():
+            lines.append(f"- {k}: {self._normalize_json_value(v)}")
         return "\n".join(lines)
     
     def find_index_field(self, table_id: str = None) -> Optional[str]:
@@ -883,7 +814,7 @@ class BitableHandle(FeishuClient):
         
         return self.http_client.bitable.v1.app_table_record.create(request)
 
-    def handle_update_record(self, record_id: str, fields: Dict[str, Any]) -> Dict[str, Any]:
+    def handle_update_record(self, record_id: str, fields: Dict[str, Any]) -> UpdateAppTableRecordResponse:
         """
         Update an existing record in a table
         
@@ -893,49 +824,21 @@ class BitableHandle(FeishuClient):
             table_id: The ID of the table (optional, uses instance table_id if not provided)
             
         Returns:
-            Dictionary containing the updated record information
+            UpdateAppTableRecordResponse object from the SDK
         """
         if not self.table_id:
-            return {
-                "success": False,
-                "error": "table_id is required either as parameter or instance variable"
-            }
-            
-        try:
-            # Create record object with updated fields
-            record = AppTableRecord.builder().fields(fields).build()
-            
-            request = UpdateAppTableRecordRequest.builder() \
-                .app_token(self.app_token) \
-                .table_id(self.table_id) \
-                .record_id(record_id) \
-                .request_body(record) \
-                .build()
-            
-            response = self.http_client.bitable.v1.app_table_record.update(request)
-            
-            if response.success():
-                return {
-                    "success": True,
-                    "record_id": response.data.record.record_id,
-                    "fields": response.data.record.fields,
-                    "last_modified_by": response.data.record.last_modified_by,
-                    "last_modified_time": response.data.record.last_modified_time
-                }
-            else:
-                return {
-                    "success": False,
-                    "error": f"Failed to update record: {response.msg}",
-                    "code": response.code
-                }
-                
-        except Exception as e:
-            return {
-                "success": False,
-                "error": f"Exception occurred: {str(e)}"
-            }
+            raise ValueError("table_id is required either as parameter or instance variable")
+        # Create record object with updated fields
+        record = AppTableRecord.builder().fields(fields).build()
+        request = UpdateAppTableRecordRequest.builder() \
+            .app_token(self.app_token) \
+            .table_id(self.table_id) \
+            .record_id(record_id) \
+            .request_body(record) \
+            .build()
+        return self.http_client.bitable.v1.app_table_record.update(request)
     
-    def handle_delete_record(self, record_id: str) -> Dict[str, Any]:
+    def handle_delete_record(self, record_id: str) -> DeleteAppTableRecordResponse:
         """
         Delete a record from a table
         
@@ -944,42 +847,18 @@ class BitableHandle(FeishuClient):
             table_id: The ID of the table (optional, uses instance table_id if not provided)
             
         Returns:
-            Dictionary containing the deletion result
+            DeleteAppTableRecordResponse object from the SDK
         """
         if not self.table_id:
-            return {
-                "success": False,
-                "error": "table_id is required either as parameter or instance variable"
-            }
-            
-        try:
-            request = DeleteAppTableRecordRequest.builder() \
-                .app_token(self.app_token) \
-                .table_id(self.table_id) \
-                .record_id(record_id) \
-                .build()
-            
-            response = self.http_client.bitable.v1.app_table_record.delete(request)
-            
-            if response.success():
-                return {
-                    "success": True,
-                    "deleted": response.data.deleted
-                }
-            else:
-                return {
-                    "success": False,
-                    "error": f"Failed to delete record: {response.msg}",
-                    "code": response.code
-                }
-                
-        except Exception as e:
-            return {
-                "success": False,
-                "error": f"Exception occurred: {str(e)}"
-            }
+            raise ValueError("table_id is required either as parameter or instance variable")
+        request = DeleteAppTableRecordRequest.builder() \
+            .app_token(self.app_token) \
+            .table_id(self.table_id) \
+            .record_id(record_id) \
+            .build()
+        return self.http_client.bitable.v1.app_table_record.delete(request)
     
-    def handle_query_record(self, record_id: str) -> Dict[str, Any]:
+    def handle_query_record(self, record_id: str) -> GetAppTableRecordResponse:
         """
         Get a specific record from a table
         
@@ -987,46 +866,16 @@ class BitableHandle(FeishuClient):
             record_id: The ID of the record to retrieve
             
         Returns:
-            Dictionary containing the record information
+            GetAppTableRecordResponse object from the SDK
         """
         if not self.table_id:
-            return {
-                "success": False,
-                "error": "table_id is required either as parameter or instance variable"
-            }
-            
-        try:
-            request = GetAppTableRecordRequest.builder() \
-                .app_token(self.app_token) \
-                .table_id(self.table_id) \
-                .record_id(record_id) \
-                .build()
-            
-            response = self.http_client.bitable.v1.app_table_record.get(request)
-            
-            if response.success():
-                record = response.data.record
-                return {
-                    "success": True,
-                    "record_id": record.record_id,
-                    "fields": record.fields,
-                    "created_by": record.created_by,
-                    "created_time": record.created_time,
-                    "last_modified_by": record.last_modified_by,
-                    "last_modified_time": record.last_modified_time
-                }
-            else:
-                return {
-                    "success": False,
-                    "error": f"Failed to get record: {response.msg}",
-                    "code": response.code
-                }
-                
-        except Exception as e:
-            return {
-                "success": False,
-                "error": f"Exception occurred: {str(e)}"
-            }
+            raise ValueError("table_id is required either as parameter or instance variable")
+        request = GetAppTableRecordRequest.builder() \
+            .app_token(self.app_token) \
+            .table_id(self.table_id) \
+            .record_id(record_id) \
+            .build()
+        return self.http_client.bitable.v1.app_table_record.get(request)
     
     def handle_search_records(self, 
                       filter: Dict[str, Any],
@@ -1079,11 +928,7 @@ class BitableHandle(FeishuClient):
         # Add filter condition (required parameter)
         body["filter"] = filter
         request = request_builder.request_body(body).build()
-        response = self.http_client.bitable.v1.app_table_record.search(request)
-        if response.success():
-            return response
-        else:
-            raise Exception(response.msg)
+        return self.http_client.bitable.v1.app_table_record.search(request)
 
     def _process_fields(self, fields: Dict[str, Any]) -> Tuple[Optional[str], Dict[str, Any]]:
         """
@@ -1243,22 +1088,72 @@ class BitableHandle(FeishuClient):
         if not query:
             return {}
         
+        # 获取字段类型映射，便于按类型归一化值
+        try:
+            field_metadata = self.get_cached_fields(self.table_id)
+        except Exception:
+            field_metadata = None
+        field_type_map = {}
+        if field_metadata:
+            try:
+                field_type_map = {getattr(f, 'field_name', None): getattr(f, 'type', None) for f in field_metadata}
+            except Exception:
+                field_type_map = {}
+
+        def normalize_value_for_field(name: str, v: Any) -> Any:
+            # 处理字符串型 JSON 的情况
+            if isinstance(v, str):
+                s = v.strip()
+                if (s.startswith("{") and s.endswith("}")) or (s.startswith("[") and s.endswith("]")):
+                    try:
+                        v = json.loads(s)
+                    except Exception:
+                        pass
+            # 处理记录引用字典，提取 record_id
+            if isinstance(v, dict) and "record_id" in v:
+                v = v.get("record_id")
+
+            t = field_type_map.get(name)
+            # 数值字段：将字符串转为数字
+            if t == 2:  # number
+                if isinstance(v, str):
+                    try:
+                        if v.isdigit():
+                            v = int(v)
+                        else:
+                            v = float(v)
+                    except Exception:
+                        pass
+            # 复选框/布尔字段：将常见字符串转为布尔
+            if t == 6:  # checkbox / boolean
+                if isinstance(v, str):
+                    lv = v.strip().lower()
+                    if lv in ("true", "1", "yes", "y"): v = True
+                    elif lv in ("false", "0", "no", "n"): v = False
+                elif isinstance(v, (int, float)):
+                    v = bool(v)
+            # 关联记录字段：值应为记录ID字符串
+            if t == 18:  # relation
+                if isinstance(v, dict) and "record_id" in v:
+                    v = v.get("record_id")
+            return v
+
         conditions = []
         for field_name, field_value in query.items():
             if isinstance(field_value, list):
-                # Handle array values - use "is" operator for each value
                 for value in field_value:
+                    nv = normalize_value_for_field(field_name, value)
                     conditions.append({
                         "field_name": field_name,
                         "operator": "is",
-                        "value": [value]
+                        "value": [nv]
                     })
             else:
-                # Handle single values - use "is" operator
+                nv = normalize_value_for_field(field_name, field_value)
                 conditions.append({
                     "field_name": field_name,
-                    "operator": "is", 
-                    "value": [field_value]
+                    "operator": "is",
+                    "value": [nv]
                 })
         
         # Use "and" conjunction to match all conditions

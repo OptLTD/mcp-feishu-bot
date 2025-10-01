@@ -170,14 +170,14 @@ def bitable_list_tables(app_token: str, page_size: int = 50) -> str:
 
 
 @mcp.tool
-def bitable_list_records(app_token: str, table_id: str, options: dict = None) -> str:
+def bitable_list_records(app_token: str, table_id: str, options: dict = {}) -> str:
     """
     [Feishu/Lark] List records in a Bitable table.
     
     Args:
         app_token: The token of the bitable app
         table_id: The ID of the table
-        options: Dictionary of pagination and query options (default: None)
+        options: Dictionary of pagination and query options (default: {})
         
     Returns:
         Markdown string containing the list of records
@@ -189,16 +189,15 @@ def bitable_list_records(app_token: str, table_id: str, options: dict = None) ->
     bitable_handle = bitable_clients[app_token].use_table(table_id)
     # Parse options for pagination and query
     page_size = int(options.get("page_size", 20))
-    page_index = int(options.get("page_index", 1))
-    query = options.get("query", {}) or {}
+    page_token = options.get("page_token", None)
 
     # Always return JSON-style per-record sections; formatting handled in bitable.py
-    return bitable_handle.describe_list_records(page_size=page_size, page_index=page_index, query=query)
+    return bitable_handle.describe_list_records(page_size=page_size, page_token=page_token)
 
 @mcp.tool
-def bitable_query_records(app_token: str, table_id: str, query: dict, options: dict = None) -> str:
+def bitable_search_records(app_token: str, table_id: str, query: dict, options: dict = None) -> str:
     """
-    [Feishu/Lark] Query records in a Bitable table with simplified field-based filtering.
+    [Feishu/Lark] Search records in a Bitable table with simplified field-based filtering.
     
     Args:
         app_token: The token of the bitable app
@@ -233,11 +232,8 @@ def bitable_query_records(app_token: str, table_id: str, query: dict, options: d
     sorts = options.get("sorts")
     page_size = int(options.get("page_size", 20))
     page_token = options.get("page_token")
-    
-    # Delegate to BitableHandle which encapsulates the query logic and Markdown generation
-    return bitable_handle.describe_query_records(
-        query=query,
-        sorts=sorts,
+    return bitable_handle.describe_search_records(
+        query=query, sorts=sorts,
         page_size=page_size,
         page_token=page_token
     )
