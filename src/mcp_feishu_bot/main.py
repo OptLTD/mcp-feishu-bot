@@ -288,6 +288,30 @@ def bitable_upsert_record(app_token: str, table_id: str, fields: dict) -> str:
 
 
 @mcp.tool
+def bitable_delete_record(app_token: str, table_id: str, record_id: str) -> str:
+    """
+    [Feishu/Lark] Delete a specific record in a Bitable table.
+
+    Args:
+        app_token: The token of the bitable app
+        table_id: The ID of the table
+        record_id: The ID of the record to delete
+
+    Returns:
+        Markdown string describing the deletion result or the error
+    """
+    global bitable_clients
+
+    if not feishu_client:
+        return "# error: Feishu client not configured\nPlease set FEISHU_APP_ID and FEISHU_APP_SECRET environment variables."
+
+    if app_token not in bitable_clients:
+        bitable_clients[app_token] = BitableHandle(app_token)
+    bitable_handle = bitable_clients[app_token].use_table(table_id)
+    return bitable_handle.describe_delete_record(record_id)
+
+
+@mcp.tool
 def drive_query_files(folder_token: str = "", options: dict = None) -> str:
     """
     [Feishu/Lark] List files in a Drive folder and return Markdown.

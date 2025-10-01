@@ -772,6 +772,28 @@ class BitableHandle(FeishuClient):
         for k, v in fields.items():
             lines.append(f"- {k}: {self._normalize_json_value(v)}")
         return "\n".join(lines)
+
+    def describe_delete_record(self, record_id: str) -> str:
+        """
+        删除记录并返回 Markdown 文本，包含错误详情。
+        """
+        if not self.table_id:
+            return "# error: table_id is required"
+        if not record_id:
+            return "# error: record_id is required"
+
+        try:
+            resp = self.handle_delete_record(record_id)
+        except Exception as e:
+            return f"# error: {str(e)}\nrecord_id: {record_id}"
+
+        if not resp.success():
+            # 尝试提取 SDK 错误详情
+            msg = getattr(resp, 'msg', None)
+            error = getattr(resp, 'error', None)
+            return f"# error: {msg}:\n{error}\nrecord_id: {record_id}"
+
+        return f"# Deleted record_id: {record_id}"
     
     def find_index_field(self, table_id: str = None) -> Optional[str]:
         """Find the first auto_number type field in the table.
