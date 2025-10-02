@@ -150,6 +150,50 @@ def chat_send_file(receive_id: str, file_path: str, receive_id_type: str = "emai
 
 
 @mcp.tool
+def drive_query_files(folder_token: str = "", options: dict = None) -> str:
+    """
+    [Feishu/Lark] List files in a Drive folder and return Markdown.
+    Options dict follows bitable_list_records style: supports page_size, page_index, order_by, direction, user_id_type, and query for multi-condition matching.
+    
+    Args:
+        folder_token: Token of the folder to list files from (empty for root directory)
+        options: Dictionary with keys:
+            - page_size: Number of items per page (default: 100, max: 200)
+            - page_index: 1-based index of the page to fetch (default: 1)
+            - order_by: Sort order (EditedTime or CreatedTime)
+            - direction: Sort direction (ASC or DESC)
+            - user_id_type: Type of user ID (open_id, union_id, user_id)
+            - query: dict of field=value pairs to filter items (string equality; lists use containment)
+    
+    Returns:
+        Markdown string containing the file list and pagination info
+    """
+    if not drive_client:
+        return "# error: Feishu client not configured\nPlease set FEISHU_APP_ID and FEISHU_APP_SECRET environment variables."
+    
+    options = options or {}
+    return drive_client.describe_files_markdown(folder_token=folder_token, options=options)
+
+
+@mcp.tool
+def drive_delete_file(file_token: str, file_type: str) -> str:
+    """
+    [Feishu/Lark] Delete a file or folder in Feishu Drive
+    
+    Args:
+        file_token: Token of the file or folder to delete
+        file_type: Type of the file (file, docx, bitable, folder, doc)
+    
+    Returns:
+        Markdown string containing the deletion result
+    """
+    if not drive_client:
+        return "# error: Feishu client not configured\nPlease set FEISHU_APP_ID and FEISHU_APP_SECRET environment variables."
+    
+    return drive_client.delete_file_markdown(file_token, file_type)
+
+
+@mcp.tool
 def bitable_list_tables(app_token: str, page_size: int = 50) -> str:
     """
     [Feishu/Lark] List all tables in a Bitable app and return Markdown describing
@@ -310,50 +354,6 @@ def bitable_delete_record(app_token: str, table_id: str, record_id: str) -> str:
         bitable_clients[app_token] = BitableHandle(app_token)
     bitable_handle = bitable_clients[app_token].use_table(table_id)
     return bitable_handle.describe_delete_record(record_id)
-
-
-@mcp.tool
-def drive_query_files(folder_token: str = "", options: dict = None) -> str:
-    """
-    [Feishu/Lark] List files in a Drive folder and return Markdown.
-    Options dict follows bitable_list_records style: supports page_size, page_index, order_by, direction, user_id_type, and query for multi-condition matching.
-    
-    Args:
-        folder_token: Token of the folder to list files from (empty for root directory)
-        options: Dictionary with keys:
-            - page_size: Number of items per page (default: 100, max: 200)
-            - page_index: 1-based index of the page to fetch (default: 1)
-            - order_by: Sort order (EditedTime or CreatedTime)
-            - direction: Sort direction (ASC or DESC)
-            - user_id_type: Type of user ID (open_id, union_id, user_id)
-            - query: dict of field=value pairs to filter items (string equality; lists use containment)
-    
-    Returns:
-        Markdown string containing the file list and pagination info
-    """
-    if not drive_client:
-        return "# error: Feishu client not configured\nPlease set FEISHU_APP_ID and FEISHU_APP_SECRET environment variables."
-    
-    options = options or {}
-    return drive_client.describe_files_markdown(folder_token=folder_token, options=options)
-
-
-@mcp.tool
-def drive_delete_file(file_token: str, file_type: str) -> str:
-    """
-    [Feishu/Lark] Delete a file or folder in Feishu Drive
-    
-    Args:
-        file_token: Token of the file or folder to delete
-        file_type: Type of the file (file, docx, bitable, folder, doc)
-    
-    Returns:
-        Markdown string containing the deletion result
-    """
-    if not drive_client:
-        return "# error: Feishu client not configured\nPlease set FEISHU_APP_ID and FEISHU_APP_SECRET environment variables."
-    
-    return drive_client.delete_file_markdown(file_token, file_type)
 
 # -------------------- Bitable Field Tools --------------------
 

@@ -4,6 +4,17 @@ import warnings, json
 from typing import Dict, Any, List, Optional, Tuple
 from fastmcp.utilities.logging import get_logger
 
+# Import utility functions from utils module
+from .utils import (
+    to_json_safe,
+    remove_nulls,
+    query_to_filter,
+    normalize_json,
+    parse_datetime,
+    format_record,
+    format_field_value
+)
+
 logger = get_logger(__name__)
 
 # Suppress deprecation warnings from lark_oapi library
@@ -105,11 +116,21 @@ class BitableHandle(FeishuClient):
         target_table_id = table_id or self.table_id
         if not target_table_id:
             raise ValueError("table_id is required either as parameter or instance variable")
-        
-        if target_table_id not in self._cached_fields:
-            self._cached_fields[target_table_id] = self.get_remote_fields(
-                table_id=target_table_id, page_size=page_size,
-            )
+
+        # Get from cache if present
+        cached = self._cached_fields.get(target_table_id)
+
+        # If not cached or cached is empty, fetch remotely and update cache
+        if not cached:
+            try:
+                fetched = self.get_remote_fields(table_id=target_table_id, page_size=page_size)
+                self._cached_fields[target_table_id] = fetched or []
+                count = len(self._cached_fields[target_table_id])
+            except Exception as e:
+                logger.warning(f"Failed to fetch fields for {target_table_id}: {e}")
+                # Ensure we always return a list
+                self._cached_fields[target_table_id] = []
+
         return self._cached_fields[target_table_id]
     
     def get_cached_views(self, table_id: str = None) -> List[Dict[str, Any]]:
@@ -284,8 +305,8 @@ class BitableHandle(FeishuClient):
             if description:
                 lines.append(f"- **Description**: {description}")
             if property_info:
-                safe_prop = self._to_json_safe(property_info)
-                clean_prop = self._remove_nulls(safe_prop)
+                safe_prop = to_json_safe(property_info)
+                clean_prop = remove_nulls(safe_prop)
                 if clean_prop:  # Only show properties if there are non-null values
                     try:
                         lines.append(f"- **Properties**: {json.dumps(clean_prop, ensure_ascii=False, indent=2)}")
@@ -413,8 +434,8 @@ class BitableHandle(FeishuClient):
                 if rtype is not None:
                     lines.append(f"- 类型: {rtype}")
                 if rprop is not None:
-                    safe_prop = self._to_json_safe(rprop)
-                    clean_prop = self._remove_nulls(safe_prop)
+                    safe_prop = to_json_safe(rprop)
+                    clean_prop = remove_nulls(safe_prop)
                     if clean_prop:  # Only show properties if there are non-null values
                         try:
                             lines.append(f"- 配置: {json.dumps(clean_prop, ensure_ascii=False)}")
@@ -686,12 +707,13 @@ class BitableHandle(FeishuClient):
 
         items = getattr(resp.data, 'items', []) if getattr(resp, 'data', None) else []
         lines = ["# Records", ""]
+        
+        # Get field metadata for proper formatting
+        field_metadata = self._get_field_metadata_dict(self.table_id)
         for rec in items or []:
-            record_id = getattr(rec, 'record_id', '')
-            fields = getattr(rec, 'fields', {}) or {}
-            lines.append(f"## record_id: {record_id}")
-            for k, v in (fields.items() if isinstance(fields, dict) else []):
-                lines.append(f"- {k}: {self._normalize_json_value(v)}")
+            # Format record using unified method
+            record_lines = format_record(rec, field_metadata)
+            lines.extend(record_lines)
             lines.append("")
 
         # 分页信息
@@ -715,7 +737,7 @@ class BitableHandle(FeishuClient):
         if not query or len(query) == 0:
             return "# error: query cannot empty"
 
-        filters = self._convert_to_filter(query or {})
+        filters = query_to_filter(query or {})
         try:
             resp = self.handle_search_records(
                 filter=filters, page_size=page_size, page_token=page_token,
@@ -732,12 +754,13 @@ class BitableHandle(FeishuClient):
 
         items = getattr(resp.data, 'items', []) if getattr(resp, 'data', None) else []
         lines = ["# Search Results", ""]
+        
+        # Get field metadata for proper formatting
+        field_metadata = self._get_field_metadata_dict(self.table_id)
         for rec in items or []:
-            record_id = getattr(rec, 'record_id', '')
-            fields = getattr(rec, 'fields', {}) or {}
-            lines.append(f"## record_id: {record_id}")
-            for k, v in (fields.items() if isinstance(fields, dict) else []):
-                lines.append(f"- {k}: {self._normalize_json_value(v)}")
+            # Format record using unified method
+            record_lines = format_record(rec, field_metadata)
+            lines.extend(record_lines)
             lines.append("")
 
         # 分页信息
@@ -782,82 +805,8 @@ class BitableHandle(FeishuClient):
 
         lines = [f"# {action}d record_id: {rid}", ""]
         for k, v in (processed.items() if isinstance(processed, dict) else []):
-            lines.append(f"- {k}: {self._normalize_json_value(v)}")
+            lines.append(f"- {k}: {normalize_json(v)}")
         return "\n".join(lines)
-
-    def _normalize_json_value(self, v):
-        """Normalize field values to JSON-friendly structures across methods.
-        Intention: Centralize normalization to keep list and single record views consistent.
-        """
-        # If value is a string that looks like JSON, try to parse it
-        if isinstance(v, str):
-            s = v.strip()
-            if s.startswith("{") or s.startswith("["):
-                try:
-                    parsed = json.loads(s)
-                    return parsed
-                except Exception:
-                    pass
-            return v
-
-        # If value is a dict and carries link-like metadata, return the dict as-is
-        if isinstance(v, dict):
-            if "table_id" in v or "record_id" in v:
-                return v
-            # Otherwise, collapse to a readable string using common keys
-            ta = v.get("text_arr")
-            if isinstance(ta, list) and ta:
-                return "、".join([str(x) for x in ta if x is not None])
-            for key in ("text", "name", "value"):
-                if v.get(key) is not None:
-                    return str(v.get(key))
-            # Fallback: compact JSON for unknown dict shape
-            try:
-                return json.dumps(v, ensure_ascii=False, separators=(",", ":"))
-            except Exception:
-                return str(v)
-
-        # If value is a list, preserve link-like dicts; otherwise normalize to strings
-        if isinstance(v, list):
-            result = []
-            link_like = False
-            for item in v:
-                # Attempt to parse JSON-looking strings inside the list
-                if isinstance(item, str):
-                    si = item.strip()
-                    if si.startswith("{") or si.startswith("["):
-                        try:
-                            item = json.loads(si)
-                        except Exception:
-                            pass
-                if isinstance(item, dict) and ("table_id" in item or "record_id" in item):
-                    link_like = True
-                    result.append(item)
-                elif isinstance(item, dict):
-                    # Convert non-link dict to a readable string
-                    ta = item.get("text_arr")
-                    if isinstance(ta, list) and ta:
-                        result.append("、".join([str(x) for x in ta if x is not None]))
-                    else:
-                        for key in ("text", "name", "value"):
-                            if item.get(key) is not None:
-                                result.append(str(item.get(key)))
-                                break
-                        else:
-                            try:
-                                result.append(json.dumps(item, ensure_ascii=False, separators=(",", ":")))
-                            except Exception:
-                                result.append(str(item))
-                else:
-                    result.append(str(item))
-            if link_like:
-                return result
-            # When not link-like, join for readability
-            parts = [p for p in result if p]
-            return "、".join(parts) if parts else ""
-
-        # Fallback for other primitive types
-        return str(v) if v is not None else ""
 
     def describe_query_record(self, record_id: str) -> str:
         """
@@ -883,11 +832,9 @@ class BitableHandle(FeishuClient):
         if not rec:
             return f"# Not found\nrecord_id: {record_id}"
 
-        lines = [f"# record_id: {getattr(rec, 'record_id', '')}", ""]
-        fields = getattr(rec, 'fields', {}) or {}
-        for k, v in (fields.items() if isinstance(fields, dict) else []):
-            lines.append(f"- {k}: {self._normalize_json_value(v)}")
-        return "\n".join(lines)
+        # Get field metadata for proper formatting
+        field_metadata = self._get_field_metadata_dict(self.table_id)
+        return "\n".join(format_record(rec, field_metadata))
 
     def describe_update_record(self, record_id: str, update_fields: Dict[str, Any]) -> str:
         """
@@ -912,8 +859,15 @@ class BitableHandle(FeishuClient):
             return f"# error: {msg}:\n{error}\nrecord_id: {record_id}"
 
         lines = [f"# Updated record_id: {record_id}", ""]
+        
+        # Get field metadata for proper formatting
+        field_metadata = self._get_field_metadata_dict(self.table_id)
+        
         for k, v in update_fields.items():
-            lines.append(f"- {k}: {self._normalize_json_value(v)}")
+            # Use format_field_value to properly handle datetime and other field types
+            field_meta = field_metadata.get(k, {})
+            formatted_value, _ = format_field_value(k, v, field_meta)
+            lines.append(f"- {k}: {formatted_value}")
         return "\n".join(lines)
     
     def describe_create_record(self, fields: Dict[str, Any]) -> str:
@@ -939,8 +893,15 @@ class BitableHandle(FeishuClient):
         record = getattr(getattr(resp, 'data', None), 'record', None)
         rid = getattr(record, 'record_id', '') if record else ''
         lines = [f"# Created record_id: {rid}", ""]
+        
+        # Get field metadata for proper formatting
+        field_metadata = self._get_field_metadata_dict(self.table_id)
+        
         for k, v in fields.items():
-            lines.append(f"- {k}: {self._normalize_json_value(v)}")
+            # Use format_field_value to properly handle datetime and other field types
+            field_meta = field_metadata.get(k, {})
+            formatted_value, _ = format_field_value(k, v, field_meta)
+            lines.append(f"- {k}: {formatted_value}")
         return "\n".join(lines)
 
     def describe_delete_record(self, record_id: str) -> str:
@@ -1158,6 +1119,10 @@ class BitableHandle(FeishuClient):
                         processed_data[field_name] = processed_value
                     else:
                         processed_data[field_name] = field_value
+                elif field_type == 5 and field_value:
+                    # Handle datetime fields (type 5)
+                    processed_value = parse_datetime(field_value)
+                    processed_data[field_name] = processed_value
                 else:
                     # Non-related field, use as-is
                     processed_data[field_name] = field_value
@@ -1171,7 +1136,7 @@ class BitableHandle(FeishuClient):
             index_field = self.find_index_field()
             index_value = else_data.get(index_field)
             if index_field and index_value:
-                search_filter = self._convert_to_filter({
+                search_filter = query_to_filter({
                     index_field: index_value,
                 })
                 logger.debug(f"Search filter: {search_filter}")
@@ -1249,7 +1214,7 @@ class BitableHandle(FeishuClient):
         index_value = value.get(index_field) if isinstance(value, dict) else value
         if index_field and index_value:
             # Search for existing record by auto_number field
-            search_filter = self._convert_to_filter({
+            search_filter = query_to_filter({
                 index_field: index_value,
             })
             result = self.handle_search_records(search_filter, relate_table_id)
@@ -1267,137 +1232,28 @@ class BitableHandle(FeishuClient):
         logger.debug(f"Fallback: returning original value: {value}")
         return value
 
-    def _convert_to_filter(self, query: Dict[str, Any]) -> Dict[str, Any]:
+    def _get_field_metadata_dict(self, table_id: str = None) -> Dict[str, Dict]:
         """
-        Convert simple query format to complex filter conditions format.
+        Get field metadata as a dictionary mapping field names to their metadata.
         
         Args:
-            query: Simple query object with field names as keys and values/arrays as values
+            table_id: Table ID to get fields for, defaults to self.table_id
             
         Returns:
-            Complex filter conditions object for search_records
+            Dictionary mapping field names to field metadata
         """
-        if not query:
-            return {}
-        
-        # 获取字段类型映射，便于按类型归一化值
+        field_metadata: Dict[str, Dict] = {}
+        target_tid = table_id or self.table_id
         try:
-            field_metadata = self.get_cached_fields(self.table_id)
-        except Exception:
-            field_metadata = None
-        field_type_map = {}
-        if field_metadata:
-            try:
-                field_type_map = {getattr(f, 'field_name', None): getattr(f, 'type', None) for f in field_metadata}
-            except Exception:
-                field_type_map = {}
-
-        def normalize_value_for_field(name: str, v: Any) -> Any:
-            # 处理字符串型 JSON 的情况
-            if isinstance(v, str):
-                s = v.strip()
-                if (s.startswith("{") and s.endswith("}")) or (s.startswith("[") and s.endswith("]")):
-                    try:
-                        v = json.loads(s)
-                    except Exception:
-                        pass
-            # 处理记录引用字典，提取 record_id
-            if isinstance(v, dict) and "record_id" in v:
-                v = v.get("record_id")
-
-            t = field_type_map.get(name)
-            # 数值字段：将字符串转为数字
-            if t == 2:  # number
-                if isinstance(v, str):
-                    try:
-                        if v.isdigit():
-                            v = int(v)
-                        else:
-                            v = float(v)
-                    except Exception:
-                        pass
-            # 复选框/布尔字段：将常见字符串转为布尔
-            if t == 6:  # checkbox / boolean
-                if isinstance(v, str):
-                    lv = v.strip().lower()
-                    if lv in ("true", "1", "yes", "y"): v = True
-                    elif lv in ("false", "0", "no", "n"): v = False
-                elif isinstance(v, (int, float)):
-                    v = bool(v)
-            # 关联记录字段：值应为记录ID字符串
-            if t == 18:  # relation
-                if isinstance(v, dict) and "record_id" in v:
-                    v = v.get("record_id")
-            return v
-
-        conditions = []
-        for field_name, field_value in query.items():
-            if isinstance(field_value, list):
-                for value in field_value:
-                    nv = normalize_value_for_field(field_name, value)
-                    conditions.append({
-                        "field_name": field_name,
-                        "operator": "is",
-                        "value": [nv]
-                    })
-            else:
-                nv = normalize_value_for_field(field_name, field_value)
-                conditions.append({
-                    "field_name": field_name,
-                    "operator": "is",
-                    "value": [nv]
-                })
-        
-        # Use "and" conjunction to match all conditions
-        return {
-            "conditions": conditions,
-            "conjunction": "and"
-        }
-    def _to_json_safe(self, obj: Any) -> Any:
-        """
-        Convert SDK objects to JSON-serializable structures safely.
-
-        Rules:
-        - Primitives returned as-is
-        - Lists/Tuples converted recursively
-        - Dicts converted recursively with stringified keys
-        - Objects: try `to_dict()` if available; otherwise use `__dict__` recursively; fallback to `str(obj)`
-        """
-        if obj is None:
-            return None
-        if isinstance(obj, (str, int, float, bool)):
-            return obj
-        if isinstance(obj, (list, tuple)):
-            return [self._to_json_safe(x) for x in obj]
-        if isinstance(obj, dict):
-            return {str(k): self._to_json_safe(v) for k, v in obj.items()}
-        # Try to_dict method
-        try:
-            to_dict = getattr(obj, 'to_dict', None)
-            if callable(to_dict):
-                d = to_dict()
-                return self._to_json_safe(d)
-        except Exception:
-            pass
-        # Fallback to __dict__ or str
-        try:
-            d = getattr(obj, '__dict__', None)
-            if isinstance(d, dict):
-                return {str(k): self._to_json_safe(v) for k, v in d.items()}
-        except Exception:
-            pass
-        return str(obj)
-
-    def _remove_nulls(self, value: Any) -> Any:
-        """
-        Recursively remove keys with None values from dicts and filter None items in lists.
-        Leaves falsy but meaningful values (e.g. False, 0, "") intact.
-        
-        Purpose: Clean up field properties by removing null values to reduce output clutter
-        """
-        if isinstance(value, dict):
-            return {k: self._remove_nulls(v) for k, v in value.items() if v is not None}
-        if isinstance(value, list):
-            return [self._remove_nulls(v) for v in value if v is not None]
-        return value
+            for f in self.get_cached_fields(target_tid):
+                fname = getattr(f, 'field_name', '') or ''
+                field_metadata[fname] = {
+                    'field_name': fname,
+                    'field_id': getattr(f, 'field_id', ''),
+                    'type': getattr(f, 'type', None),
+                    'property': getattr(f, 'property', None),
+                }
+        except Exception as e:
+            logger.warning(f"Failed to get cached fields for {target_tid}: {e}")
+        return field_metadata
 
