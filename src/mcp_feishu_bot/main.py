@@ -272,8 +272,9 @@ def bitable_upsert_record(app_token: str, table_id: str, fields: dict) -> str:
     
     Logic:
     1. If record_id is provided, use update logic
-    2. If no record_id, use auto_number field to match existing record
-    3. For related fields, match records in related tables using auto_number field, create if not found
+    2. If no record_id, use first field as index field to match existing record
+    3. For related fields, match records in related tables using record_id or index field, create if not found
+    4. Datetime fields must be timestamp in milliseconds or ISO 8601 format (e.g., "2023-01-01T00:00:00Z")
 
     Args:
         app_token: The token of the bitable app
@@ -353,6 +354,69 @@ def drive_delete_file(file_token: str, file_type: str) -> str:
         return "# error: Feishu client not configured\nPlease set FEISHU_APP_ID and FEISHU_APP_SECRET environment variables."
     
     return drive_client.delete_file_markdown(file_token, file_type)
+
+# -------------------- Bitable Field Tools --------------------
+
+@mcp.tool
+def bitable_query_fields(app_token: str, table_id: str) -> str:
+    """
+    [Feishu/Lark] Retrieve all fields of a given table and return Markdown.
+
+    Args:
+        app_token: Bitable app token
+        table_id: Target table ID
+
+    Returns:
+        Markdown string describing field details and properties
+    """
+    if app_token not in bitable_clients:
+        bitable_clients[app_token] = BitableHandle(app_token)
+    bitable_handle = bitable_clients[app_token].use_table(table_id)
+    return bitable_handle.describe_query_fields(table_id)
+
+
+@mcp.tool
+def bitable_upsert_fields(app_token: str, table_id: str, fields: list[dict]) -> str:
+    """
+    [Feishu/Lark] Batch upsert fields (create or update) and return a Markdown result.
+
+    Rules:
+    - field minimal properties: `field_name`, `field_type`
+    - If field exists, update it, otherwise create a new field.
+    - If field is a related field, it must reference an existing table.
+    - If field is a single-select or multi-select field, it must have options.
+
+    Args:
+        app_token: Bitable app token
+        table_id: Target table ID
+        fields: List of field definitions
+
+    Returns:
+        Markdown string with the result of each field operation
+    """
+    if app_token not in bitable_clients:
+        bitable_clients[app_token] = BitableHandle(app_token)
+    bitable_handle = bitable_clients[app_token].use_table(table_id)
+    return bitable_handle.describe_upsert_fields(fields)
+
+
+@mcp.tool
+def bitable_delete_fields(app_token: str, table_id: str, field_ids: list[str] = None) -> str:
+    """
+    [Feishu/Lark] Batch delete fields using `field_ids` only.
+
+    Args:
+        app_token: Bitable app token
+        table_id: Target table ID
+        field_ids: List of field IDs to delete
+
+    Returns:
+        Markdown string describing deletion results
+    """
+    if app_token not in bitable_clients:
+        bitable_clients[app_token] = BitableHandle(app_token)
+    bitable_handle = bitable_clients[app_token].use_table(table_id)
+    return bitable_handle.describe_delete_fields(field_ids=field_ids)
 
 if __name__ == "__main__":
     # Allow direct execution via python -m or script run

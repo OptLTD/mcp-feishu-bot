@@ -246,7 +246,7 @@ class BitableHandle(FeishuClient):
         views = []
         return views
 
-    def describe_fields(self, table_id: str = None) -> str:
+    def describe_query_fields(self, table_id: str = None) -> str:
         """
         Describe all fields in a table, returning detailed field information in Markdown.
         
@@ -263,7 +263,8 @@ class BitableHandle(FeishuClient):
             return "# error: table_id is required"
             
         try:
-            fields = self.get_cached_fields(target_table_id)
+            fields = self.get_remote_fields(target_table_id)
+            self._cached_fields[target_table_id] = fields
         except Exception as e:
             return f"# error: {str(e)}\ntable_id: {target_table_id}"
         if not fields:
@@ -283,9 +284,178 @@ class BitableHandle(FeishuClient):
             if description:
                 lines.append(f"- **Description**: {description}")
             if property_info:
-                lines.append(f"- **Properties**: {json.dumps(property_info, ensure_ascii=False, indent=2)}")
+                safe_prop = self._to_json_safe(property_info)
+                clean_prop = self._remove_nulls(safe_prop)
+                if clean_prop:  # Only show properties if there are non-null values
+                    try:
+                        lines.append(f"- **Properties**: {json.dumps(clean_prop, ensure_ascii=False, indent=2)}")
+                    except Exception:
+                        lines.append(f"- **Properties**: {str(clean_prop)}")
             lines.append("")
         
+        return "\n".join(lines)
+
+    # ---- Field Create/Update/Delete Handlers and Batch Markdown Wrappers ----
+    def handle_create_field(self, field_def: Dict[str, Any]):
+        """Create a field in current table using SDK.
+
+        Expected field_def keys:
+        - field_name: str (required)
+        - type: int (required)
+        - property: dict (optional)
+        - description: str (optional)
+        """
+        if not self.table_id:
+            raise ValueError("table_id is required either as parameter or instance variable")
+        # Build SDK field body
+        body = AppTableField.builder() \
+            .field_name(field_def.get("field_name")) \
+            .type(field_def.get("type")) \
+            .property(field_def.get("property")) \
+            .description(field_def.get("description")) \
+            .build()
+        request = CreateAppTableFieldRequest.builder() \
+            .app_token(self.app_token) \
+            .table_id(self.table_id) \
+            .request_body(body) \
+            .build()
+        return self.http_client.bitable.v1.app_table_field.create(request)
+
+    def handle_update_field(self, field_id: str, field_def: Dict[str, Any]):
+        """Update a field in current table using SDK.
+
+        field_id is required. field_def keys same as create; name/type/property/description
+        """
+        if not self.table_id:
+            raise ValueError("table_id is required either as parameter or instance variable")
+        body = AppTableField.builder() \
+            .field_name(field_def.get("field_name")) \
+            .type(field_def.get("type")) \
+            .property(field_def.get("property")) \
+            .description(field_def.get("description")) \
+            .build()
+        request = UpdateAppTableFieldRequest.builder() \
+            .app_token(self.app_token) \
+            .table_id(self.table_id) \
+            .field_id(field_id) \
+            .request_body(body) \
+            .build()
+        return self.http_client.bitable.v1.app_table_field.update(request)
+
+    def handle_delete_field(self, field_id: str):
+        """Delete a field in current table using SDK."""
+        if not self.table_id:
+            raise ValueError("table_id is required either as parameter or instance variable")
+        request = DeleteAppTableFieldRequest.builder() \
+            .app_token(self.app_token) \
+            .table_id(self.table_id) \
+            .field_id(field_id) \
+            .build()
+        return self.http_client.bitable.v1.app_table_field.delete(request)
+
+    def describe_upsert_fields(self, fields: List[Dict[str, Any]]) -> str:
+        """
+        批量新增或更新字段，并返回 Markdown 结果。
+
+        约定：
+        - 若传入对象含有 `field_id`，则执行更新；
+        - 否则若含有 `field_name` 且同名字段已存在，则更新该字段；
+        - 其余情况执行新增。
+
+        字段对象示例：
+        {"field_name": "状态", "type": 3, "property": {"options": [{"name": "Open"}, {"name": "Closed"}]}}
+        """
+        if not self.table_id:
+            return "# error: table_id is required"
+        if not fields or not isinstance(fields, list):
+            return "# error: fields is required"
+
+        # Map existing fields for name -> id resolution
+        try:
+            existing = self.get_cached_fields(self.table_id)
+        except Exception as e:
+            return f"# error: {str(e)}"
+        name_to_id = {getattr(f, 'field_name', None): getattr(f, 'field_id', None) for f in (existing or [])}
+
+        lines: List[str] = ["# 字段批量新增/更新结果", ""]
+        for item in fields:
+            if not isinstance(item, dict):
+                lines.append(f"## error: invalid field item: {item}")
+                lines.append("")
+                continue
+            field_id = item.get("field_id")
+            field_name = item.get("field_name")
+            if not field_id and field_name and name_to_id.get(field_name):
+                field_id = name_to_id.get(field_name)
+            try:
+                if field_id:
+                    resp = self.handle_update_field(field_id, item)
+                    action = "updated"
+                else:
+                    resp = self.handle_create_field(item)
+                    action = "created"
+            except Exception as e:
+                lines.append(f"## error: {str(e)}")
+                lines.append("")
+                continue
+
+            if getattr(resp, 'success', None) and resp.success():
+                data = getattr(resp, 'data', None)
+                # Attempt to extract returned field
+                ret_field = getattr(data, 'field', None) or getattr(data, 'app_table_field', None)
+                rid = getattr(ret_field, 'field_id', '') if ret_field else (field_id or '')
+                rname = getattr(ret_field, 'field_name', '') if ret_field else (field_name or '')
+                rtype = getattr(ret_field, 'type', '') if ret_field else item.get('type')
+                rprop = getattr(ret_field, 'property', None) if ret_field else item.get('property')
+                lines.append(f"## {action}: {rname or rid}")
+                if rid:
+                    lines.append(f"- 字段ID: {rid}")
+                if rtype is not None:
+                    lines.append(f"- 类型: {rtype}")
+                if rprop is not None:
+                    safe_prop = self._to_json_safe(rprop)
+                    clean_prop = self._remove_nulls(safe_prop)
+                    if clean_prop:  # Only show properties if there are non-null values
+                        try:
+                            lines.append(f"- 配置: {json.dumps(clean_prop, ensure_ascii=False)}")
+                        except Exception:
+                            lines.append(f"- 配置: {str(clean_prop)}")
+            else:
+                msg = getattr(resp, 'msg', None)
+                error = getattr(resp, 'error', None)
+                lines.append(f"## error: {msg}:\n{error}")
+            lines.append("")
+        return "\n".join(lines)
+
+    def describe_delete_fields(self, field_ids: List[str] = None) -> str:
+        """
+        批量删除字段，并返回 Markdown 结果。
+
+        仅通过 `field_ids` 删除字段。
+        """
+        if not self.table_id:
+            return "# error: table_id is required"
+
+        target_ids: List[str] = [fid for fid in (field_ids or []) if fid]
+
+        if not target_ids:
+            return "# error: no fields to delete"
+
+        lines: List[str] = ["# 字段批量删除结果", ""]
+        for fid in target_ids:
+            try:
+                resp = self.handle_delete_field(fid)
+            except Exception as e:
+                lines.append(f"## error: {str(e)}")
+                lines.append("")
+                continue
+            if getattr(resp, 'success', None) and resp.success():
+                lines.append(f"## deleted: {fid}")
+            else:
+                msg = getattr(resp, 'msg', None)
+                error = getattr(resp, 'error', None)
+                lines.append(f"## error: {msg}:\n{error}")
+            lines.append("")
         return "\n".join(lines)
 
     def describe_tables(self, page_size: int = 50) -> str:
@@ -1183,4 +1353,51 @@ class BitableHandle(FeishuClient):
             "conditions": conditions,
             "conjunction": "and"
         }
+    def _to_json_safe(self, obj: Any) -> Any:
+        """
+        Convert SDK objects to JSON-serializable structures safely.
+
+        Rules:
+        - Primitives returned as-is
+        - Lists/Tuples converted recursively
+        - Dicts converted recursively with stringified keys
+        - Objects: try `to_dict()` if available; otherwise use `__dict__` recursively; fallback to `str(obj)`
+        """
+        if obj is None:
+            return None
+        if isinstance(obj, (str, int, float, bool)):
+            return obj
+        if isinstance(obj, (list, tuple)):
+            return [self._to_json_safe(x) for x in obj]
+        if isinstance(obj, dict):
+            return {str(k): self._to_json_safe(v) for k, v in obj.items()}
+        # Try to_dict method
+        try:
+            to_dict = getattr(obj, 'to_dict', None)
+            if callable(to_dict):
+                d = to_dict()
+                return self._to_json_safe(d)
+        except Exception:
+            pass
+        # Fallback to __dict__ or str
+        try:
+            d = getattr(obj, '__dict__', None)
+            if isinstance(d, dict):
+                return {str(k): self._to_json_safe(v) for k, v in d.items()}
+        except Exception:
+            pass
+        return str(obj)
+
+    def _remove_nulls(self, value: Any) -> Any:
+        """
+        Recursively remove keys with None values from dicts and filter None items in lists.
+        Leaves falsy but meaningful values (e.g. False, 0, "") intact.
+        
+        Purpose: Clean up field properties by removing null values to reduce output clutter
+        """
+        if isinstance(value, dict):
+            return {k: self._remove_nulls(v) for k, v in value.items() if v is not None}
+        if isinstance(value, list):
+            return [self._remove_nulls(v) for v in value if v is not None]
+        return value
 
