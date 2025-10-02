@@ -25,7 +25,7 @@ from lark_oapi.api.im.v1 import (
 from mcp_feishu_bot.client import FeishuClient
 
 
-class MessageHandle(FeishuClient):
+class MsgHandle(FeishuClient):
     """
     Feishu message client with comprehensive messaging functionality
     """

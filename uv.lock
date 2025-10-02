@@ -554,6 +554,7 @@ dependencies = [
     { name = "fastmcp" },
     { name = "lark-oapi" },
     { name = "python-socks" },
+    { name = "websockets" },
 ]
 
 [package.metadata]
@@ -561,6 +562,7 @@ requires-dist = [
     { name = "fastmcp", specifier = ">=2.12.3" },
     { name = "lark-oapi", specifier = ">=1.4.23" },
     { name = "python-socks", specifier = ">=2.7.2" },
+    { name = "websockets", specifier = ">=11.0" },
 ]
 
 [[package]]

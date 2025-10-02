@@ -6,9 +6,7 @@ A Model Context Protocol (MCP) server that integrates with Feishu (Lark) messagi
 Provides tools for sending messages, images, and files through Feishu API with auto long connection.
 """
 
-import os
-import atexit
-import warnings
+import os, atexit, warnings 
 from typing import Optional
 
 # Additional runtime warning suppression as backup
@@ -17,24 +15,51 @@ warnings.filterwarnings("ignore", category=DeprecationWarning)
 from fastmcp import FastMCP
 from mcp_feishu_bot.drive import DriveHandle
 from mcp_feishu_bot.client import FeishuClient
-from mcp_feishu_bot.message import MessageHandle
+from mcp_feishu_bot.msg import MsgHandle
 from mcp_feishu_bot.bitable import BitableHandle
+from mcp_feishu_bot.agent import AgentClient
+from mcp_feishu_bot.relay import RelayHandle
 
 # Initialize FastMCP server
 mcp = FastMCP("Feishu MCP Server")
 
 # Initialize global Feishu clients
-chat_client: Optional[MessageHandle] = None
+msg_client: Optional[MsgHandle] = None
+relay_client: Optional[RelayHandle] = None
 drive_client: Optional[DriveHandle] = None
+agent_client: Optional[AgentClient] = None
 feishu_client: Optional[FeishuClient] = None
 bitable_clients: Optional[dict[str, BitableHandle]] = {}
 
+def initialize_agent_client() -> Optional[AgentClient]:
+    global agent_client, relay_client
+   
+    msg_server = os.getenv("FEISHU_MSG_SERVER")
+    agent_server = os.getenv("FEISHU_AGENT_SERVER")
+    if msg_server.upper() == "ON" and agent_server:
+        agent_client = AgentClient(
+            url=agent_server, reconnect=True,
+            on_event=relay_client.on_agent_event,
+        )
+        agent_client.start()
+        print("[Info] Agent WS long connection started")
+    else:
+        print("[Info] Agent WS long connection not started (disabled)")
+
+    return agent_client
+
+def cleanup_agent_client():
+    global agent_client
+    try:
+        if agent_client:
+            agent_client.stop()
+            print("[Info] Agent WS long connection stopped")
+    except Exception as e:
+        print(f"[Warning] Failed to stop Agent WS: {e}")
+
 def initialize_feishu_client() -> Optional[FeishuClient]:
-    """
-    Initialize Feishu clients with environment variables and start long connection.
-    Returns None if required environment variables are not set.
-    """
-    global feishu_client, chat_client, drive_client, bitable_clients 
+    global feishu_client, relay_client
+    global msg_client, drive_client 
     
     app_id = os.getenv("FEISHU_APP_ID")
     app_secret = os.getenv("FEISHU_APP_SECRET")
@@ -45,11 +70,12 @@ def initialize_feishu_client() -> Optional[FeishuClient]:
         return None
     
     try:
-        # Initialize base client for connection management
-        feishu_client = FeishuClient(app_id, app_secret)
-        
+        feishu_client = FeishuClient(
+            app_id=app_id, app_secret=app_secret, 
+            on_event=relay_client.on_feishu_msg,
+        )
         # Initialize specialized clients
-        chat_client = MessageHandle(app_id, app_secret)
+        msg_client = MsgHandle(app_id, app_secret)
         drive_client = DriveHandle(app_id, app_secret)
     except Exception as e:
         print(f"[Error] Failed to initialize Feishu client: {str(e)}")
@@ -65,9 +91,6 @@ def initialize_feishu_client() -> Optional[FeishuClient]:
     return feishu_client
 
 def cleanup_feishu_client():
-    """
-    Cleanup function to stop long connection when server shuts down.
-    """
     global feishu_client
     if feishu_client and feishu_client.is_connected():
         feishu_client.stop_long_connection()
@@ -75,11 +98,12 @@ def cleanup_feishu_client():
 
 # Register cleanup function to run on exit
 atexit.register(cleanup_feishu_client)
+atexit.register(cleanup_agent_client)
 
 def main() -> None:
-    """Entry point for console script to start MCP server.
-    Intention: Provide a stable callable for packaging.
-    """
+    global relay_client
+    relay_client = RelayHandle()
+    initialize_agent_client()
     initialize_feishu_client()
     mcp.run(show_banner=False)
 
@@ -98,12 +122,12 @@ def chat_send_text(receive_id: str, content: str, receive_id_type: str = "email"
     Returns:
         Markdown string containing the result of the message sending operation
     """
-    global chat_client
+    global msg_client
     
-    if not chat_client:
+    if not msg_client:
         return "# error: Feishu client not configured\nPlease set FEISHU_APP_ID and FEISHU_APP_SECRET environment variables."
     
-    return chat_client.send_text_markdown(receive_id, content, msg_type, receive_id_type)
+    return msg_client.send_text_markdown(receive_id, content, msg_type, receive_id_type)
 
 
 @mcp.tool
@@ -119,12 +143,12 @@ def chat_send_image(receive_id: str, image_path: str, receive_id_type: str = "em
     Returns:
         Markdown string containing the result of the image sending operation
     """
-    global chat_client
+    global msg_client
     
-    if not chat_client:
+    if not msg_client:
         return "# error: Feishu client not configured\nPlease set FEISHU_APP_ID and FEISHU_APP_SECRET environment variables."
     
-    return chat_client.send_image_markdown(receive_id, image_path, receive_id_type)
+    return msg_client.send_image_markdown(receive_id, image_path, receive_id_type)
 
 
 @mcp.tool
@@ -141,12 +165,12 @@ def chat_send_file(receive_id: str, file_path: str, receive_id_type: str = "emai
     Returns:
         Markdown string containing the result of the file sending operation
     """
-    global chat_client
+    global msg_client
     
-    if not chat_client:
+    if not msg_client:
         return "# error: Feishu client not configured\nPlease set FEISHU_APP_ID and FEISHU_APP_SECRET environment variables."
     
-    return chat_client.send_file_markdown(receive_id, file_path, receive_id_type, file_type)
+    return msg_client.send_file_markdown(receive_id, file_path, receive_id_type, file_type)
 
 
 @mcp.tool

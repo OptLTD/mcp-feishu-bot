@@ -24,7 +24,10 @@ class FeishuClient:
     Base Feishu API client with core functionality for authentication and event handling
     """
     
-    def __init__(self, app_id: Optional[str] = None, app_secret: Optional[str] = None):
+    def __init__(self, 
+            app_id: Optional[str] = None, app_secret: Optional[str] = None, 
+            on_event: Callable[[lark.im.v1.P2ImMessageReceiveV1Data], None] = None,
+        ):
         """
         Initialize Feishu client with app credentials
         
@@ -49,6 +52,7 @@ class FeishuClient:
         self._ws_client = None
         self._event_handler = None
         self._is_connected = False
+        self._on_event = on_event
     
     @property
     def http_client(self) -> lark.Client:
@@ -78,20 +82,9 @@ class FeishuClient:
         Args:
             data: Message receive event data
         """
-        print(f'[Message Received] data: {lark.JSON.marshal(data, indent=4)}')
-        
-        # Extract message information
-        message = data.event.message
-        sender = data.event.sender
-        
-        # Process message based on type
-        if hasattr(message, 'message_type'):
-            if message.message_type == "text":
-                self._process_text_message(message, sender)
-            elif message.message_type == "image":
-                self._process_image_message(message, sender)
-            elif message.message_type == "file":
-                self._process_file_message(message, sender)
+        if self._on_event is None:
+            return
+        self._on_event(data.event)
     
     def _handle_custom_event(self, data: lark.CustomizedEvent) -> None:
         """
@@ -102,40 +95,7 @@ class FeishuClient:
             data: Custom event data
         """
         print(f'[Custom Event] type: {data.type}, data: {lark.JSON.marshal(data, indent=4)}')
-    
-    def _process_text_message(self, message: Any, sender: Any) -> None:
-        """
-        Process text message events
-        Override this method in subclasses to implement custom text message processing
-        
-        Args:
-            message: Message object
-            sender: Sender information
-        """
-        pass
-    
-    def _process_image_message(self, message: Any, sender: Any) -> None:
-        """
-        Process image message events
-        Override this method in subclasses to implement custom image message processing
-        
-        Args:
-            message: Message object
-            sender: Sender information
-        """
-        pass
-    
-    def _process_file_message(self, message: Any, sender: Any) -> None:
-        """
-        Process file message events
-        Override this method in subclasses to implement custom file message processing
-        
-        Args:
-            message: Message object
-            sender: Sender information
-        """
-        pass
-    
+ 
     def start_long_connection(self) -> bool:
         """
         Start long connection for receiving events via WebSocket

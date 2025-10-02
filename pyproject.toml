@@ -8,6 +8,7 @@ dependencies = [
     "fastmcp>=2.12.3",
     "lark-oapi>=1.4.23",
     "python-socks>=2.7.2",
+    "websockets>=11.0",
 ]
 
 [project.scripts]
