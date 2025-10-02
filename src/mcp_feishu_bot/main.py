@@ -356,6 +356,28 @@ def bitable_delete_record(app_token: str, table_id: str, record_id: str) -> str:
     return bitable_handle.describe_delete_record(record_id)
 
 # -------------------- Bitable Field Tools --------------------
+@mcp.tool
+def bitable_create_table(app_token: str, table_name: str, fields: list[dict] = None) -> str:
+    """
+    [Feishu/Lark] Create a Bitable table by `table_name` and `fields`.
+
+    Logic:
+    - create a new table with optional initial fields.
+    - field properties: `field_name`, `type` required. 
+    - field type enum: 1: 文本, 2: 数字, 3: 日期, 4: 单选, 5: 多选, 7: 人员, 11: 链接, 13: 附件, 15: 状态, 17: 进度, 18: 倒计时, 20: 地理位置, 21: 单选（关联）, 22: 多选（关联）, 23: 自动编号, 1001: 长文本, 1002: 多行文本, 1003: 邮箱, 1004: 手机号, 1005: 组织架构
+
+    Args:
+        app_token: Bitable app token
+        table_name: Target table name to create
+        fields: Optional list of field definitions to create
+
+    Returns:
+        Markdown describing table create table with fields results
+    """
+    if app_token not in bitable_clients:
+        bitable_clients[app_token] = BitableHandle(app_token)
+    bitable_handle = bitable_clients[app_token]
+    return bitable_handle.describe_create_table(table_name, fields)
 
 @mcp.tool
 def bitable_query_fields(app_token: str, table_id: str) -> str:
@@ -381,7 +403,8 @@ def bitable_upsert_fields(app_token: str, table_id: str, fields: list[dict]) -> 
     [Feishu/Lark] Batch upsert fields (create or update) and return a Markdown result.
 
     Rules:
-    - field minimal properties: `field_name`, `field_type`
+    - field properties: `field_name`, `type` required.
+    - field type defined ref bitable_create_table field type enum.
     - If field exists, update it, otherwise create a new field.
     - If field is a related field, it must reference an existing table.
     - If field is a single-select or multi-select field, it must have options.

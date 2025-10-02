@@ -1,2 +1,0 @@
-[console_scripts]
-mcp-feishu-bot = mcp_feishu_bot.main:main

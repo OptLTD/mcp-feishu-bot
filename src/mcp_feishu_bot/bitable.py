@@ -27,22 +27,28 @@ from lark_oapi.api.bitable.v1 import (
 )
 from lark_oapi.api.bitable.v1 import (
     ListAppTableRequest,
+    CreateAppTableRequest,
+    CreateAppTableResponse,
+    CreateAppTableRequestBody,
     ListAppTableFieldRequest,
+    CreateAppTableFieldRequest,
+    UpdateAppTableFieldRequest,
+    DeleteAppTableFieldRequest,
+    GetAppTableRecordRequest,
     ListAppTableRecordRequest,
     CreateAppTableRecordRequest,
     UpdateAppTableRecordRequest,
     DeleteAppTableRecordRequest,
-    GetAppTableRecordRequest,
     SearchAppTableRecordRequest,
-    CreateAppTableFieldRequest,
-    UpdateAppTableFieldRequest,
-    DeleteAppTableFieldRequest,
+    GetAppTableRecordResponse,
     ListAppTableRecordResponse,
     CreateAppTableRecordResponse,
     SearchAppTableRecordResponse,
     UpdateAppTableRecordResponse,
     DeleteAppTableRecordResponse,
-    GetAppTableRecordResponse,
+)
+from lark_oapi.api.bitable.v1 import (
+    ReqTable
 )
 
 from mcp_feishu_bot.client import FeishuClient
@@ -85,6 +91,58 @@ class BitableHandle(FeishuClient):
         """
         self.table_id = table_id
         return self
+
+    # ---- Table Create/Update Handlers ----
+    def handle_create_table(self, name: str, fields: List[Dict[str, Any]] = None) -> CreateAppTableResponse:
+        """Create a table using SDK (create-only). Fields are not included in request body."""
+        if not self.app_token:
+            raise ValueError("app_token is required")
+        table_builder = ReqTable.builder().name(name).fields(fields or None)
+        request_body = CreateAppTableRequestBody.builder()\
+            .table(table_builder.build()).build()
+        request = CreateAppTableRequest.builder() \
+            .app_token(self.app_token) \
+            .request_body(request_body) \
+            .build()
+        return self.http_client.bitable.v1.app_table.create(request)
+
+    def _find_table_by_name(self, name: str) -> Optional[AppTable]:
+        """Find a table by its name and return the SDK object if exists."""
+        tables = self.get_cached_tables() if getattr(self, 'get_cached_tables', None) else self.get_remote_tables()
+        for t in tables or []:
+            if getattr(t, 'name', None) == name:
+                return t
+        return None
+
+    def describe_create_table(self, table_name: str, fields: List[Dict[str, Any]] = None) -> str:
+        """Create a table by name (create-only). If table exists, do not update fields."""
+        if not table_name:
+            return "# error: table_name is required"
+        try:
+            existing = self._find_table_by_name(table_name)
+        except Exception as e:
+            return f"# error: {str(e)}"
+
+        if existing:
+            tid = getattr(existing, 'table_id', '')
+            self.table_id = tid
+            lines: List[str] = [f"# exists table: {table_name} (id:{tid})", ""]
+            lines.append("- use bitable_upsert_fields to add or update fields")
+            return "\n".join(lines)
+        
+        try:
+            resp = self.handle_create_table(table_name, fields=fields)
+        except Exception as e:
+            return f"# error: {str(e)}"
+        if not resp.success():
+            msg = getattr(resp, 'msg', None)
+            error = getattr(resp, 'error', None)
+            return f"# error: {msg}:\n{error}"
+        
+        self._cached_tables = {}
+        tid = resp.data.table_id
+        lines = [f"# created table: {table_name} (id:{tid})", ""]
+        return "\n".join(lines)
     
     def get_cached_tables(self, page_size: int = 50) -> List[Dict[str, Any]]:
         """
@@ -95,10 +153,8 @@ class BitableHandle(FeishuClient):
         Returns:
             List of cached tables
         """
-        if self._cached_tables is None:
-            self._cached_tables = self.get_remote_tables(
-                page_size=page_size,
-            )
+        if not self._cached_tables or len(self._cached_tables) == 0:
+            self._cached_tables = self.get_remote_tables(page_size)
         return self._cached_tables
     
     def get_cached_fields(self, table_id: str = None, page_size: int = 50) -> List[Dict[str, Any]]:

@@ -46,6 +46,20 @@
     }
     ```
 
+## 新增 Bitable 表创建工具（Create-only）
+
+- `bitable_create_table(app_token, table_name, fields=None)`
+  - 仅创建数据表：
+    - 若同名表已存在：返回存在提示，不进行任何字段更新。
+    - 若不存在同名表：创建新表。`fields` 参数将被忽略，请使用 `bitable_upsert_fields` 管理字段。
+  - 调用示例：
+    ```json
+    {
+      "tool": "bitable_create_table",
+      "args": {"app_token": "bitable_app_token_xxx", "table_name": "任务列表"}
+    }
+    ```
+
 ## 环境变量
 
 在运行前确保配置：
