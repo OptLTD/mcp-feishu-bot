@@ -71,7 +71,8 @@ class FeishuClient:
         """
         return lark.EventDispatcherHandler.builder("", "") \
             .register_p2_im_message_receive_v1(self._handle_message_receive) \
-            .register_p1_customized_event("out_approval", self._handle_custom_event) \
+            .register_p2_im_message_message_read_v1(self._handle_message_read) \
+            .register_p2_customized_event("out_approval", self._handle_custom_event) \
             .build()
     
     def _handle_message_receive(self, data: lark.im.v1.P2ImMessageReceiveV1) -> None:
@@ -85,6 +86,19 @@ class FeishuClient:
         if self._on_event is None:
             return
         self._on_event(data.event)
+
+    def _handle_message_read(self, data: object) -> None:
+        """
+        Handle message read events (v1.0)
+        Logs the event payload to confirm capture.
+        """
+        # try:
+        #     # Marshal to JSON string if possible (SDK provides JSON helper)
+        #     payload = lark.JSON.marshal(data, indent=4)
+        #     print(f"[Lark] message_read_v1 captured: {payload}")
+        # except Exception:
+        #     print(f"[Lark] message_read_v1 captured (raw): {data}")
+        pass
     
     def _handle_custom_event(self, data: lark.CustomizedEvent) -> None:
         """

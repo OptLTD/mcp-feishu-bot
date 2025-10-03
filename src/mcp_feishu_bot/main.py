@@ -13,12 +13,12 @@ from typing import Optional
 warnings.filterwarnings("ignore", category=DeprecationWarning)
 
 from fastmcp import FastMCP
-from mcp_feishu_bot.drive import DriveHandle
-from mcp_feishu_bot.client import FeishuClient
-from mcp_feishu_bot.msg import MsgHandle
-from mcp_feishu_bot.bitable import BitableHandle
-from mcp_feishu_bot.agent import AgentClient
-from mcp_feishu_bot.relay import RelayHandle
+from .msg import MsgHandle
+from .drive import DriveHandle
+from .client import FeishuClient
+from .bitable import BitableHandle
+from .robot import RobotClient
+from .relay import RelayHandle
 
 # Initialize FastMCP server
 mcp = FastMCP("Feishu MCP Server")
@@ -27,39 +27,39 @@ mcp = FastMCP("Feishu MCP Server")
 msg_client: Optional[MsgHandle] = None
 relay_client: Optional[RelayHandle] = None
 drive_client: Optional[DriveHandle] = None
-agent_client: Optional[AgentClient] = None
+robot_client: Optional[RobotClient] = None
 feishu_client: Optional[FeishuClient] = None
 bitable_clients: Optional[dict[str, BitableHandle]] = {}
 
-def initialize_agent_client() -> Optional[AgentClient]:
-    global agent_client, relay_client
+def initialize_agent_client(relay_handle: RelayHandle) -> Optional[RobotClient]:
+    global robot_client
    
     msg_server = os.getenv("FEISHU_MSG_SERVER")
-    agent_server = os.getenv("FEISHU_AGENT_SERVER")
-    if msg_server.upper() == "ON" and agent_server:
-        agent_client = AgentClient(
-            url=agent_server, reconnect=True,
-            on_event=relay_client.on_agent_event,
+    robot_host = os.getenv("FEISHU_ROBOT_HOST")
+    if msg_server.upper() == "ON" and robot_host:
+        robot_client = RobotClient(
+            host=robot_host, reconnect=True,
+            on_event=relay_handle.on_robot_event,
         )
-        agent_client.start()
-        print("[Info] Agent WS long connection started")
+        robot_client.start()
+        print("[Info] Robot WS long connection started")
     else:
-        print("[Info] Agent WS long connection not started (disabled)")
+        print("[Info] Robot WS long connection not started")
 
-    return agent_client
+    relay_handle.set_robot(robot_client)
+    return robot_client
 
 def cleanup_agent_client():
-    global agent_client
+    global robot_client
     try:
-        if agent_client:
-            agent_client.stop()
+        if robot_client:
+            robot_client.stop()
             print("[Info] Agent WS long connection stopped")
     except Exception as e:
         print(f"[Warning] Failed to stop Agent WS: {e}")
 
-def initialize_feishu_client() -> Optional[FeishuClient]:
-    global feishu_client, relay_client
-    global msg_client, drive_client 
+def initialize_feishu_client(relay_handle: RelayHandle) -> Optional[FeishuClient]:
+    global feishu_client, msg_client, drive_client 
     
     app_id = os.getenv("FEISHU_APP_ID")
     app_secret = os.getenv("FEISHU_APP_SECRET")
@@ -72,7 +72,7 @@ def initialize_feishu_client() -> Optional[FeishuClient]:
     try:
         feishu_client = FeishuClient(
             app_id=app_id, app_secret=app_secret, 
-            on_event=relay_client.on_feishu_msg,
+            on_event=relay_handle.on_feishu_msg,
         )
         # Initialize specialized clients
         msg_client = MsgHandle(app_id, app_secret)
@@ -88,6 +88,9 @@ def initialize_feishu_client() -> Optional[FeishuClient]:
             print("[Info] Feishu long connection started successfully")
         else:
             print("[Warning] Failed to start Feishu long connection")
+
+    # finally set the msg_client to relay_handle
+    relay_handle.set_feishu(msg_client)
     return feishu_client
 
 def cleanup_feishu_client():
@@ -101,22 +104,20 @@ atexit.register(cleanup_feishu_client)
 atexit.register(cleanup_agent_client)
 
 def main() -> None:
-    global relay_client
-    relay_client = RelayHandle()
-    initialize_agent_client()
-    initialize_feishu_client()
+    relay_handle = RelayHandle()
+    initialize_agent_client(relay_handle)
+    initialize_feishu_client(relay_handle)
     mcp.run(show_banner=False)
 
 
 @mcp.tool
-def chat_send_text(receive_id: str, content: str, receive_id_type: str = "email", msg_type: str = "text") -> str:
+def chat_send_text(receive_id: str, content: str, receive_id_type: str = "email") -> str:
     """
     [Feishu/Lark] Send a message to a user or group.
     
     Args:
         receive_id: The ID of the message receiver (user_id, open_id, union_id, email, or chat_id)
         content: The message content (text or rich text format)
-        msg_type: Message type (text, rich_text, etc.)
         receive_id_type: Type of receiver ID (open_id, user_id, union_id, email, chat_id)
         
     Returns:
@@ -127,7 +128,14 @@ def chat_send_text(receive_id: str, content: str, receive_id_type: str = "email"
     if not msg_client:
         return "# error: Feishu client not configured\nPlease set FEISHU_APP_ID and FEISHU_APP_SECRET environment variables."
     
-    return msg_client.send_text_markdown(receive_id, content, msg_type, receive_id_type)
+    try:
+        resp = msg_client.send_text(
+            content, receive_id, receive_id_type
+        )
+        if not resp.success():
+            return f"# error: Failed to send message: {resp.error}"
+    except Exception as e:
+        return f"# error: Failed to send message: {str(e)}"
 
 
 @mcp.tool
@@ -148,7 +156,14 @@ def chat_send_image(receive_id: str, image_path: str, receive_id_type: str = "em
     if not msg_client:
         return "# error: Feishu client not configured\nPlease set FEISHU_APP_ID and FEISHU_APP_SECRET environment variables."
     
-    return msg_client.send_image_markdown(receive_id, image_path, receive_id_type)
+    try:
+        resp = msg_client.send_image(
+            image_path, receive_id, receive_id_type
+        )
+        if not resp.success():
+            return f"# error: Failed to send image: {resp.error}"
+    except Exception as e:
+        return f"# error: Failed to send image: {str(e)}"
 
 
 @mcp.tool
@@ -170,7 +185,51 @@ def chat_send_file(receive_id: str, file_path: str, receive_id_type: str = "emai
     if not msg_client:
         return "# error: Feishu client not configured\nPlease set FEISHU_APP_ID and FEISHU_APP_SECRET environment variables."
     
-    return msg_client.send_file_markdown(receive_id, file_path, receive_id_type, file_type)
+    try:
+        resp = msg_client.send_file(
+            file_path, receive_id, receive_id_type, file_type
+        )
+        if not resp.success():
+            return f"# error: Failed to send file: {resp.error}"
+    except Exception as e:
+        return f"# error: Failed to send file: {str(e)}"
+
+
+@mcp.tool
+def chat_send_card(receive_id: str, content: str, receive_id_type: str = "email") -> str:
+    """
+    [Feishu/Lark] Send an interactive card message.
+
+    Args:
+        receive_id: The ID of the message receiver (user_id, open_id, union_id, email, chat_id)
+        content: The interactive card content as JSON string (schema 2.0)
+        receive_id_type: Type of receiver ID (open_id, user_id, union_id, email, chat_id)
+
+    Returns:
+        Markdown string containing the result of the message sending operation
+    """
+    global msg_client
+
+    if not msg_client:
+        return "# error: Feishu client not configured\nPlease set FEISHU_APP_ID and FEISHU_APP_SECRET environment variables."
+
+    try:
+        # Validate JSON early for clearer error messages
+        try:
+            json.loads(content)
+        except Exception:
+            return "# error: Invalid card content JSON. Please provide a valid schema 2.0 JSON string."
+
+        resp = msg_client.send_card(
+            receive_id=receive_id,
+            content=content,
+            receive_id_type=receive_id_type,
+        )
+        if not resp.success():
+            return f"# error: Failed to send card: {resp.error}"
+        return "# ok: Card message sent successfully"
+    except Exception as e:
+        return f"# error: Failed to send card: {str(e)}"
 
 
 @mcp.tool

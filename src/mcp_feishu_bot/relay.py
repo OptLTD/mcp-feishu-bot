@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
+from cmath import e
 """
 Relay Handle
 
-在 Agent 与 Feishu 之间进行事件归一化与记录：
-- 从 Agent 的自定义消息事件映射为统一结构，仅记录/输出
+在 Robot 与 Feishu 之间进行事件归一化与记录：
+- 从 Robot 的自定义消息事件映射为统一结构，仅记录/输出
 - 从 Feishu 的消息/自定义事件归一化为统一结构，仅记录/输出
 """
 
 from typing import Any, Dict, Optional
+import json
 
 import lark_oapi as lark  # 仅用于类型提示与兼容
 from lark_oapi.api.im.v1 import (
@@ -15,40 +17,60 @@ from lark_oapi.api.im.v1 import (
     P2ImMessageReceiveV1Data
 )
 
+from .robot import RobotClient
+from .msg import MsgHandle
+
 
 class RelayHandle:
     def __init__(self) -> None:
         # 仅做事件归一化与记录，不持有任何客户端
         pass
     
-    def on_agent_event(self, payload: dict) -> None:
-        """处理 Agent 事件，归一化并记录。"""
+    def set_feishu(self, feishu: MsgHandle) -> None:
+        """初始化 Relay 句柄，绑定 Feishu 客户端。"""
+        self.feishu = feishu
+
+    def set_robot(self, robot: RobotClient) -> None:
+        """初始化 Relay 句柄，绑定 Robot 客户端。"""
+        self.robot = robot
+
+
+    def on_robot_event(self, payload: dict) -> None:
+        """处理 Robot 事件，归一化并记录。"""
         # 当无法解析为 JSON 时，按普通消息处理
         if not isinstance(payload, dict):
-            print(f"[Agent] unknown payload: {payload}")
+            print(f"[Relay] unknown payload: {payload}")
             return
 
         method = payload.get("method")
-        action = payload.get("action")
-        detail = payload.get("detail")
-        taskid = payload.get("taskid")
-        if method != "message" :
-            print(f"[Agent]  {method}, {action}, {detail}")
+        method_list = ["system", "message"]
+        if method not in method_list:
             return
         
-        act_list = ["user-input", "stream", "change"]
-        if action == "errors":
-            self._on_errors(action, detail, taskid)
-        elif action == "respond":
-            self._on_respond(action, detail, taskid)
-        elif action == "control":
-            self._on_control(action, detail, taskid)
-        elif action not in act_list:
-            print(f"[Agent] unknown method: {method}, payload: {payload}")
+        taskid = payload.get("taskid")
+        action = payload.get("action")
+        detail = payload.get("detail")
+        try:
+            act_list = [
+                "user-input", "hello",
+                "stream", "change",
+            ]
+            if action == "errors":
+                self._on_errors(action, detail, taskid)
+            elif action == "respond":
+                self._on_respond(action, detail, taskid)
+            elif action == "control":
+                self._on_control(action, detail, taskid)
+            elif action == "welcome":
+                print(f"[Relay] connect success: {detail}")
+            elif action not in act_list:
+                print(f"[Relay] unknown action: {action}, payload: {payload}")
+        except Exception as e:
+            print(f"[Relay] error: {e}, payload: {payload}")
 
     def on_feishu_msg(self, payload: P2ImMessageReceiveV1Data) -> None:
         """处理 Feishu 事件，归一化并记录。"""
-        print(f'[Message Received] data: {lark.JSON.marshal(payload, indent=4)}')
+        # print(f'[Message Received] data: {lark.JSON.marshal(payload, indent=4)}')
 
         # Extract message information
         message = payload.message
@@ -63,13 +85,36 @@ class RelayHandle:
             
     # ---------- Agent -> Relay ----------
     def _on_errors(self, action: Optional[str], detail: Any, taskid: Optional[str]) -> None:
-        print(f"[Agent] errors {taskid}, {action}, {detail}")
+        print(f"[Relay] errors {taskid}, {action}, {detail}")
 
-    def _on_respond(self, action: Optional[str], detail: Any, taskid: Optional[str]) -> None:
-        print(f"[Agent] respond {taskid}, {action}, {detail}")
+    def _on_respond(self, action: Optional[str], detail: Dict[str, Any], taskid: Optional[str]) -> None:
+        # Normalize detail to dict
+        if not isinstance(detail, dict):
+            print(f"[Relay] unknown detail: {detail}")
+            return
+        # Extract actions
+        content_parts: list[str] = []
+        actions = detail.get("actions") or []
+        if not isinstance(actions, list):
+            for item in actions:
+                type = item.get("type")
+                if type == 'tool-result':
+                    txt = item.get("content")
+                    content_parts.append(txt.strip())
+                elif type == 'complete':
+                    txt = item.get("content")
+                    content_parts.append(txt.strip())
+        else:
+            content_parts.append(detail.get("thinking", "").strip())
+        
+        # send respond to feishu
+        email="chnwine@qq.com"
+        reply="\n\n".join(content_parts).strip()
+        self.feishu.send_text(content=reply, receive_id=email)
+        print(f"[Relay] respond task={taskid}, action={action}")
 
     def _on_control(self, action: Optional[str], detail: Any, taskid: Optional[str]) -> None:
-        print(f"[Agent] control {taskid}, {action}, {detail}")
+        print(f"[Relay] control {taskid}, {action}, {detail}")
 
     # ---------- Feishu -> Relay ----------
     def _on_custom_event(self, data: lark.CustomizedEvent) -> None:
@@ -102,8 +147,31 @@ class RelayHandle:
             message: Message object
             sender: Sender information
         """
-        print(f'[Message Received] text: {msg.content}, sender: {lark.JSON.marshal(sender, indent=4)}')
-
+        if self.robot is None:
+            print(f'[Relay] text: {msg.content}, sender: {lark.JSON.marshal(sender, indent=4)}')
+            return
+        try:
+            # 立即回复一个 OneSecond 表情
+            self.feishu.reply_emoji(msg.message_id, emoji_type="OneSecond")
+            try:
+                data = json.loads(msg.content) or {'text': ""}
+                resp = self.robot.send_msg(data['text'])
+                if "errmsg" in resp:
+                    print(f"[Relay] error message: {msg.content}")
+                    return
+                if 'message' in resp:
+                    self.feishu.send_text(
+                        content=resp['message'], 
+                        receive_id="chnwine@qq.com",
+                    )
+                    print(f"[Relay] reply text: {msg.content}, resp: {resp}")
+                if 'emoji' in resp:
+                    self.feishu.reply_emoji(msg.message_id, resp['emoji'])
+                    print(f"[Relay] reply emoji: {msg.content}, resp: {resp}")
+            except Exception as e:
+                print(f"[Relay] failed to reply emoji: {e}")
+        except Exception as e:
+            print(f"[Relay] failed to reply text: {msg.content}, error: {e}")
     
     def _on_image_msg(self, msg: EventMessage, sender: EventSender) -> None:
         """
