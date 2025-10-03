@@ -24,6 +24,11 @@ from lark_oapi.api.im.v1 import (
     CreateMessageReactionRequest, 
     CreateMessageReactionResponse,
     CreateMessageReactionRequestBody, 
+    ReplyMessageRequestBody, 
+    ReplyMessageRequest,
+    ReplyMessageResponse,
+    GetMessageResourceRequest, 
+    GetMessageResourceResponse,
 )
 
 from mcp_feishu_bot.client import FeishuClient
@@ -53,9 +58,8 @@ class MsgHandle(FeishuClient):
             try:
                 json.loads(content)
             except (json.JSONDecodeError, ValueError):
-                content = json.dumps({
-                    'text': content
-                }, ensure_ascii=False)
+                meta= { 'text': content }
+                content = json.dumps(meta, ensure_ascii=False)
         else:
             content = json.dumps(content, ensure_ascii=False)
 
@@ -172,15 +176,39 @@ class MsgHandle(FeishuClient):
             content_str = content
         else:
             content_str = json.dumps(content, ensure_ascii=False)
+        # send text
+        return self.send_text(receive_id, content_str, "interactive", receive_id_type)
 
-        # Build and send interactive message
-        body = CreateMessageRequestBody.builder() \
-            .content(content_str).msg_type("interactive") \
-            .receive_id(receive_id).build()
-        request = CreateMessageRequest.builder() \
-            .receive_id_type(receive_id_type) \
+    def reply_text(self, message_id: str, content: str, msg_type: str = "text") -> ReplyMessageResponse:
+        """
+        Reply a text message.
+
+        Args:
+            message_id: The target message ID to reply to
+            content: Text content to send
+
+        Returns:
+            CreateMessageResponse from SDK
+        """
+        if not message_id:
+            raise ValueError("message_id is required")
+        if not content:
+            raise ValueError("content is required")
+
+        if isinstance(content, str):
+            try:
+                json.loads(content)
+            except (json.JSONDecodeError, ValueError):
+                meta= { 'text': content }
+                content = json.dumps(meta, ensure_ascii=False)
+        else:
+            content = json.dumps(content, ensure_ascii=False)
+        
+        body = ReplyMessageRequestBody.builder() \
+            .content(content).msg_type(msg_type).build()
+        request = ReplyMessageRequest.builder() \
             .request_body(body).build()
-        return self.http_client.im.v1.message.create(request)
+        return self.http_client.im.v1.message.reply(request)
 
     def reply_emoji(self, message_id: str, emoji_type: str) -> CreateMessageReactionResponse:
         """
@@ -205,3 +233,96 @@ class MsgHandle(FeishuClient):
             .message_id(message_id) \
             .request_body(body).build()
         return self.http_client.im.v1.message_reaction.create(request)
+
+    def save_file(self, message_id: str, file_key: str, message_type: str = "file") -> GetMessageResourceResponse:
+        """
+        Save file to a local file.
+
+        Args:
+            message_id: The target message ID to save
+            file_key: The file key of the file to save
+        """
+        request = GetMessageResourceRequest.builder() \
+            .message_id(message_id).type(message_type) \
+            .file_key(file_key).build()
+
+        response = self.http_client.im.v1.message_resource.get(request)
+        if response.success():
+            base_path = os.environ.get("STORAGE_PATH", "./")
+            if response.file_name:
+                file_name = f"{base_path}/{response.file_name}"
+            elif message_type == "image":
+                name = f"image-{message_id}.png"
+                file_name = f"{base_path}/{name}"
+            f = open(f"{file_name}", "wb")
+            f.write(response.file.read())
+            f.close()
+        return response
+
+    def save_image(self, message_id: str,  file_key: str = "") -> GetMessageResourceResponse:
+        """
+        Save image to a file.
+
+        Args:
+            message_id: The target message ID to save
+            file_key: The file key of the image to save
+        """
+        return self.save_file(message_id, file_key, "image")
+
+    def build_card(self, data: dict) -> str:
+        """
+        Build an interactive card message.
+
+        Args:
+            content: Card content as dict or JSON string (must conform to schema 2.0)
+
+        Returns:
+            JSON string of the interactive card message
+        """
+      
+        result = {
+            "schema": "2.0", 
+            "config": {
+                "update_multi": True 
+            },
+            "card_link": {},
+            "header": {},
+            "body": {
+                "elements": []
+            },
+            "fallback": {}
+        }
+        if 'title' in data:
+            result['header'] = {
+                "tag": "plain_text",
+                "content": data['title']   
+            }
+        elements = []
+        if 'content' in data:
+            elements.append({
+                "tag": "markdown",
+                "content": data['content'],
+                "text_align": "left",
+                "text_size": "normal_v2",
+                "margin": "0px 0px 0px 0px"
+            })
+        if 'button' in data:
+            elements.append({
+                "tag": "button",
+                "text": {
+                    "tag": "plain_text",
+                    "content": data['button']
+                },
+                "type": "default",
+                "width": "default",
+                "size": "medium",
+                "behaviors": [
+                    {
+                        "type": "open_url",
+                        "default_url": data['action'],
+                    }
+                ],
+                "margin": "0px 0px 0px 0px"
+            })
+        result['body']['elements'] = elements
+        return result

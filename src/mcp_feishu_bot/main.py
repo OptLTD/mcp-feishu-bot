@@ -36,7 +36,8 @@ def initialize_agent_client(relay_handle: RelayHandle) -> Optional[RobotClient]:
    
     msg_server = os.getenv("FEISHU_MSG_SERVER")
     robot_host = os.getenv("FEISHU_ROBOT_HOST")
-    if msg_server.upper() == "ON" and robot_host:
+    # Guard against None for msg_server to avoid AttributeError
+    if msg_server and msg_server.upper() == "ON" and robot_host:
         robot_client = RobotClient(
             host=robot_host, reconnect=True,
             on_event=relay_handle.on_robot_event,

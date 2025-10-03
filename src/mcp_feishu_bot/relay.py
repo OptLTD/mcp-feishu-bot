@@ -153,23 +153,18 @@ class RelayHandle:
         try:
             # 立即回复一个 OneSecond 表情
             self.feishu.reply_emoji(msg.message_id, emoji_type="OneSecond")
-            try:
-                data = json.loads(msg.content) or {'text': ""}
-                resp = self.robot.send_msg(data['text'])
-                if "errmsg" in resp:
-                    print(f"[Relay] error message: {msg.content}")
-                    return
-                if 'message' in resp:
-                    self.feishu.send_text(
-                        content=resp['message'], 
-                        receive_id="chnwine@qq.com",
-                    )
-                    print(f"[Relay] reply text: {msg.content}, resp: {resp}")
-                if 'emoji' in resp:
-                    self.feishu.reply_emoji(msg.message_id, resp['emoji'])
-                    print(f"[Relay] reply emoji: {msg.content}, resp: {resp}")
-            except Exception as e:
-                print(f"[Relay] failed to reply emoji: {e}")
+            # 解析 JSON 内容, 并转发给机器人
+            data = json.loads(msg.content) or {'text': ""}
+            resp = self.robot.send_msg(data['text'])
+            if "errmsg" in resp:
+                print(f"[Relay] error message: {msg.content}")
+                return
+            if 'message' in resp:
+                self.feishu.reply_text(msg.message_id, resp['message'])
+                print(f"[Relay] reply text: {msg.content}, resp: {resp}")
+            if 'emoji' in resp:
+                self.feishu.reply_emoji(msg.message_id, resp['emoji'])
+                print(f"[Relay] reply emoji: {msg.content}, resp: {resp}")
         except Exception as e:
             print(f"[Relay] failed to reply text: {msg.content}, error: {e}")
     
@@ -182,7 +177,19 @@ class RelayHandle:
             message: Message object
             sender: Sender information
         """
-        pass
+        if self.robot is None:
+            print(f'[Relay] image: {msg.content}, sender: {lark.JSON.marshal(sender, indent=4)}')
+            return
+        try:
+            # 立即回复一个 OneSecond 表情
+            self.feishu.reply_emoji(msg.message_id, emoji_type="OneSecond")
+            data = json.loads(msg.content) or {'image_key': ""}
+            resp = self.feishu.save_image(msg.message_id, data['image_key'])
+            if resp.success():
+                # todo 发送图片到机器人
+                print(f"[Relay] reply image: {msg.content}, resp: {resp}")
+        except Exception as e:
+            print(f"[Relay] failed to reply image: {msg.content}, error: {e}")
     
     def _on_file_msg(self, msg: EventMessage, sender: EventSender) -> None:
         """
@@ -193,5 +200,17 @@ class RelayHandle:
             message: Message object
             sender: Sender information
         """
-        pass
-   
+        if self.robot is None:
+            print(f'[Relay] file: {msg.content}, sender: {lark.JSON.marshal(sender, indent=4)}')
+            return
+        try:
+            # 立即回复一个 OneSecond 表情
+            self.feishu.reply_emoji(msg.message_id, emoji_type="OneSecond")
+            data = json.loads(msg.content) or {'file_key': ""}
+            resp = self.feishu.save_file(msg.message_id, data['file_key'])
+            if resp.success():
+                # todo 发送文件到机器人
+                print(f"[Relay] reply file: {msg.content}, resp: {resp}")
+        except Exception as e:
+            print(f"[Relay] failed to reply file: {msg.content}, error: {e}")
+

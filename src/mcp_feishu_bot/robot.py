@@ -109,9 +109,9 @@ class RobotClient:
         }
 
         print(f"[Robot] intent request: content='{content}'")
-        payload = json.dumps(body).encode("utf-8")
+        payload = json.dumps(body, ensure_ascii=False)
         req = urllib.request.Request(
-            url=url, data=payload, method="POST",
+            url=url, data=payload.encode("utf-8"), method="POST",
             headers={"Content-Type": "application/json"},
         )
         try:
