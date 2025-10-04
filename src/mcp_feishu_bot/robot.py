@@ -84,10 +84,7 @@ class RobotClient:
         except Exception:
             pass
     
-    def send_file(self, uploads: list, session: str = "feishu-bot") -> Optional[Dict[str, Any]]:
-        return self.send_msg(content="", uploads=uploads, session=session)
-
-    def send_msg(self, content: str, uploads: Optional[list] = [], session: str = "feishu-bot") -> Optional[Dict[str, Any]]:
+    def get_intent(self, content: str, uploads: Optional[list] = [], session: str = "feishu-bot") -> Optional[Dict[str, Any]]:
         """
         意图识别（HTTP POST /api/intent）。
 
@@ -112,7 +109,7 @@ class RobotClient:
             "uploads": uploads,
         }
 
-        print(f"[Robot] intent request: content='{content}'")
+        print(f"[Robot] intent request: content='{content}, uploads={uploads}'")
         payload = json.dumps(body, ensure_ascii=False)
         req = urllib.request.Request(
             url=url, data=payload.encode("utf-8"), method="POST",

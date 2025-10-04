@@ -8,7 +8,7 @@ Relay Handle
 - 从 Feishu 的消息/自定义事件归一化为统一结构，仅记录/输出
 """
 
-import json,time
+import json,time, threading
 from typing import Any, Dict, Optional
 
 import lark_oapi as lark  # 仅用于类型提示与兼容
@@ -29,7 +29,14 @@ class RelayHandle:
         self._seen_trace_ids: Dict[str, float] = {}
         # 维护去重集合的 TTL，避免无限增长（默认 30 分钟）
         self._dedup_ttl_seconds: int = 1800
-    
+
+        # 会话级待处理上下文：按 chat_id 缓存文本与上传文件
+        # 结构：{ 
+        #   'chat_id': { 'text': str|None, 'uploads': list[str], 
+        #   'timer': threading.Timer|None, 'message_id': str|None } 
+        # }
+        self._pending_intents: Dict[str, Dict[str, Any]] = {}
+
     def set_feishu(self, feishu: MsgHandle) -> None:
         """初始化 Relay 句柄，绑定 Feishu 客户端。"""
         self.feishu = feishu
@@ -188,20 +195,38 @@ class RelayHandle:
             return
         try:
             # 立即回复一个 OneSecond 表情
-            self.feishu.reply_emoji(msg.message_id, emoji_type="OneSecond")
-            # 解析 JSON 内容, 并转发给机器人
+            self.feishu.reply_emoji(msg.message_id, "OneSecond")
             data = json.loads(msg.content) or {'text': ""}
-            resp = self.robot.send_msg(data['text'])
-            if "errmsg" in resp:
-                print(f"[Relay] error message: {resp['errmsg']}")
-                self.feishu.reply_text(msg.message_id, resp['errmsg'])
+
+            # 如果之前缓存了文件（先图片后文字），则合并为一次完整调用
+            state = self._pending_intents.get(msg.chat_id) or {}
+            if (state.get('uploads') or []) and not state.get('text'):
+                # 合并上下文调用机器人 并清理状态
+                uploads = list(state.get('uploads') or [])
+                intent = self.robot.get_intent(data['text'], uploads=uploads)
+                if state.get('timer'):
+                    state.get('timer').cancel()
+                self._pending_intents.pop(msg.chat_id, None)
+            else:
+                # 直接意图识别
+                intent = self.robot.get_intent(data['text'])
+
+            if "errmsg" in intent and intent['errmsg']:
+                print(f"[Relay] error message: {intent['errmsg']}")
+                self.feishu.reply_text(msg.message_id, intent['errmsg'])
                 return
-            if 'message' in resp:
-                self.feishu.reply_text(msg.message_id, resp['message'])
-                print(f"[Relay] reply text: {msg.content}, resp: {resp}")
-            if 'emoji' in resp:
-                self.feishu.reply_emoji(msg.message_id, resp['emoji'])
-                print(f"[Relay] reply emoji: {msg.content}, resp: {resp}")
+            if 'message' in intent and intent['message']:
+                self.feishu.reply_text(msg.message_id, intent['message'])
+                print(f"[Relay] reply text: {msg.content}, resp: {intent}")
+            if 'emoji' in intent and intent['emoji']:
+                self.feishu.reply_emoji(msg.message_id, intent['emoji'])
+                print(f"[Relay] reply emoji: {msg.content}, resp: {intent}")
+
+            # send intent to robot if intent == 'wait'
+            is_type_wait = 'intent' in intent and intent['intent'] == 'wait'
+            is_msg_wait = 'message' in intent and intent['message'] == 'wait'
+            if is_type_wait or is_msg_wait:
+                self._cache_intent(msg, 10)
         except Exception as e:
             print(f"[Relay] failed to reply text: {msg.content}, error: {e}")
     
@@ -219,17 +244,11 @@ class RelayHandle:
             return
         try:
             # 立即回复一个 OneSecond 表情
-            self.feishu.reply_emoji(msg.message_id, emoji_type="OneSecond")
+            # self.feishu.reply_emoji(msg.message_id, emoji_type="OneSecond")
             data = json.loads(msg.content) or {'image_key': ""}
-            resp = self.feishu.save_image(msg.message_id, data['image_key'])
-            if resp.success():
-                resp = self.robot.send_file(uploads=[resp.file_name])
-                if "errmsg" in resp:
-                    print(f"[Relay] error message: {msg.content}")
-                    return
-                if 'message' in resp:
-                    self.feishu.reply_text(msg.message_id, resp['message'])
-                    print(f"[Relay] reply image: {msg.content}, resp: {resp}")
+            saved = self.feishu.save_image(msg.message_id, data['image_key'])
+            if saved.success():
+                self._cache_upload(msg, saved.file_name)
         except Exception as e:
             print(f"[Relay] failed to reply image: {msg.content}, error: {e}")
     
@@ -247,12 +266,106 @@ class RelayHandle:
             return
         try:
             # 立即回复一个 OneSecond 表情
-            self.feishu.reply_emoji(msg.message_id, emoji_type="OneSecond")
+            # self.feishu.reply_emoji(msg.message_id, emoji_type="OneSecond")
             data = json.loads(msg.content) or {'file_key': ""}
-            resp = self.feishu.save_file(msg.message_id, data['file_key'])
-            if resp.success():
-                # todo 发送文件到机器人
-                print(f"[Relay] reply file: {msg.content}, resp: {resp}")
+            saved = self.feishu.save_file(msg.message_id, data['file_key'])
+            if saved.success():
+                self._cache_upload(msg, saved.file_name)
         except Exception as e:
             print(f"[Relay] failed to reply file: {msg.content}, error: {e}")
 
+    def _cache_intent(self, msg: EventMessage, timeout: int = 10) -> None:
+        """缓存待处理意图，等待后续文件/图片合并调用机器人。"""
+        data = json.loads(msg.content) or {'text': ""}
+        state = self._pending_intents.get(msg.chat_id) or {
+            'text': None, 'uploads': [],
+            'timer': None, 'message_id': None,
+        }
+        self._pending_intents[msg.chat_id] = {
+            'text': data.get('text', ''), 'timer': None,
+            'uploads': state.get('uploads') or [],
+            'message_id': msg.message_id,
+        }
+        self._set_timer(msg, timeout)
+
+
+    def _cache_upload(self, msg: EventMessage, filename: str) -> None:
+        """缓存上传文件，并在存在待处理文字时与文字合并调用机器人。"""
+        chat_id, msg_id = msg.chat_id, msg.message_id
+        print(f"[Relay] cached upload for chat={chat_id}: {filename}")
+        state = self._pending_intents.get(chat_id) or {
+            'text': None, 'uploads': [],
+            'timer': None, 'message_id': None,
+        }
+        # 写回状态；仅在已有文字等待时才启动定时器
+        state['uploads'].append(filename)
+        if state.get('text'):
+            self._set_timer(msg, timeout = 10)
+        self._pending_intents[chat_id] = state
+
+        if not state.get('text'):
+            print(f"[Relay] really cached upload for chat={chat_id}: {filename}")
+            return
+        
+        try:
+            resp = self.robot.get_intent(state['text'], uploads=state['uploads'])
+            if 'message' in resp and resp['message']:
+                self.feishu.reply_text(msg_id, resp['message'])
+            if 'emoji' in resp and resp['emoji']:
+                self.feishu.reply_emoji(msg_id, resp['emoji'])
+            print(f"[Relay] merged text+uploads: {resp}")
+        except Exception as ex:
+            print(f"[Relay] failed to merge text+uploads: {ex}")
+        finally:
+            if state.get('timer'):
+                state['timer'].cancel()
+            self._pending_intents.pop(chat_id, None)
+    
+    # 设置超时定时器
+    def _set_timer(self, msg: EventMessage, timeout: int = 10):
+        # 先取消已存在定时器，然后重新设置新定时器
+        chat_id = msg.chat_id
+        state = self._pending_intents.get(chat_id)
+        if not state:
+            state = {
+                'text': None,
+                'uploads': [],
+                'timer': None,
+                'message_id': msg.message_id,
+            }
+            self._pending_intents[chat_id] = state
+        else:
+            # 确保 message_id 记录有值
+            state['message_id'] = state.get('message_id') or msg.message_id
+
+        if state.get('timer'):
+            state['timer'].cancel()
+        timer = threading.Timer(timeout, self._on_timeout, args=(chat_id,))
+        state['timer'] = timer
+        timer.start()
+
+    # 启动10秒超时：若10秒未收到新文件，则结束等待并按纯文本处理
+    def _on_timeout(self, chat_id: str):
+        if not self._pending_intents.get(chat_id):
+            return
+        state = self._pending_intents.get(chat_id)
+        text = state.get('text') or ''
+        uploads = state.get('uploads') or []
+        if not text or len(uploads) == 0:
+            # 没有文字则直接清理，不进行空意图请求
+            self._pending_intents.pop(chat_id, None)
+            print(f"[Relay] wait-timeout abort: {chat_id}")
+            return
+        # 如果仍未有附件，触发一次仅文本的处理并清理状态
+        try:
+            resp = self.robot.get_intent(text)
+            msg_id = state.get('message_id')
+            if 'message' in resp:
+                self.feishu.reply_text(msg_id, resp['message'])
+            if 'emoji' in resp:
+                self.feishu.reply_emoji(msg_id, resp['emoji'])
+            print(f"[Relay] wait-timeout proceed text-only: {resp}")
+        except Exception as ex:
+            print(f"[Relay] wait-timeout failed: {ex}")
+        finally:
+            self._pending_intents.pop(chat_id, None)
