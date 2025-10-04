@@ -207,7 +207,7 @@ class MsgHandle(FeishuClient):
         body = ReplyMessageRequestBody.builder() \
             .content(content).msg_type(msg_type).build()
         request = ReplyMessageRequest.builder() \
-            .request_body(body).build()
+            .request_body(body).message_id(message_id).build()
         return self.http_client.im.v1.message.reply(request)
 
     def reply_emoji(self, message_id: str, emoji_type: str) -> CreateMessageReactionResponse:
@@ -252,8 +252,8 @@ class MsgHandle(FeishuClient):
             if response.file_name:
                 file_name = f"{base_path}/{response.file_name}"
             elif message_type == "image":
-                name = f"image-{message_id}.png"
-                file_name = f"{base_path}/{name}"
+                response.file_name = f"image-{message_id}.png"
+                file_name = f"{base_path}/{response.file_name}"
             f = open(f"{file_name}", "wb")
             f.write(response.file.read())
             f.close()

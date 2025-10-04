@@ -8,8 +8,8 @@ Relay Handle
 - 从 Feishu 的消息/自定义事件归一化为统一结构，仅记录/输出
 """
 
+import json,time
 from typing import Any, Dict, Optional
-import json
 
 import lark_oapi as lark  # 仅用于类型提示与兼容
 from lark_oapi.api.im.v1 import (
@@ -25,6 +25,10 @@ class RelayHandle:
     def __init__(self) -> None:
         # 仅做事件归一化与记录，不持有任何客户端
         pass
+        # 事件去重：记录已处理的 trace_id 及其时间，用于过滤重复事件
+        self._seen_trace_ids: Dict[str, float] = {}
+        # 维护去重集合的 TTL，避免无限增长（默认 30 分钟）
+        self._dedup_ttl_seconds: int = 1800
     
     def set_feishu(self, feishu: MsgHandle) -> None:
         """初始化 Relay 句柄，绑定 Feishu 客户端。"""
@@ -71,17 +75,44 @@ class RelayHandle:
     def on_feishu_msg(self, payload: P2ImMessageReceiveV1Data) -> None:
         """处理 Feishu 事件，归一化并记录。"""
         # print(f'[Message Received] data: {lark.JSON.marshal(payload, indent=4)}')
+     
+        # 0) 定期清理过期的去重记录
+        now_sec = int(time.time())
+        self._prune_seen(now_sec)
+
+        # 1) 按 trace_id 过滤重复事件
+        trace_id = payload.message.message_id
+        if trace_id in self._seen_trace_ids:
+            print(f"[Relay] duplicate event ignored: trace_id={trace_id}")
+            return
+
+        # 2) 丢弃 10 分钟之前的消息
+        msg_ts = int(payload.message.create_time) 
+        if now_sec - (msg_ts // 1000) > 600:
+            print(f"[Relay] expired message, msg_id={trace_id}")
+            return
 
         # Extract message information
         message = payload.message
         sender = payload.sender
         msg_type = message.message_type
+        self._seen_trace_ids[trace_id] = now_sec
         if msg_type == "text":
             self._on_text_msg(message, sender)
         elif msg_type == "image":
             self._on_image_msg(message, sender)
         elif msg_type == "file":
             self._on_file_msg(message, sender)
+
+    def _prune_seen(self, now_sec: int) -> None:
+        """清理超过 TTL 的 trace_id 记录，避免集合无限增长。"""
+        cutoff = now_sec - self._dedup_ttl_seconds
+        stale_keys = [k for k, v in self._seen_trace_ids.items() if v < cutoff]
+        for k in stale_keys:
+            try:
+                del self._seen_trace_ids[k]
+            except KeyError:
+                pass
             
     # ---------- Agent -> Relay ----------
     def _on_errors(self, action: Optional[str], detail: Any, taskid: Optional[str]) -> None:
@@ -92,20 +123,25 @@ class RelayHandle:
         if not isinstance(detail, dict):
             print(f"[Relay] unknown detail: {detail}")
             return
-        # Extract actions
+        has_tool_result = False
         content_parts: list[str] = []
-        actions = detail.get("actions") or []
-        if not isinstance(actions, list):
-            for item in actions:
-                type = item.get("type")
-                if type == 'tool-result':
-                    txt = item.get("content")
-                    content_parts.append(txt.strip())
-                elif type == 'complete':
-                    txt = item.get("content")
-                    content_parts.append(txt.strip())
-        else:
-            content_parts.append(detail.get("thinking", "").strip())
+        for item in detail.get("actions") or []:
+            type = item.get("type")
+            if type == 'make-ask':
+                has_tool_result = True
+                txt = item.get("question")
+                content_parts.append(txt.strip())
+                opts = item.get("options") or []
+                content_parts.append("\n".join(opts))
+                continue
+            if type == 'complete':
+                has_tool_result = True
+                txt = item.get("content")
+                content_parts.append(txt.strip())
+                continue
+        if not has_tool_result:
+            print(f"[Relay] not finish: {detail}")
+            return
         
         # send respond to feishu
         email="chnwine@qq.com"
@@ -157,7 +193,8 @@ class RelayHandle:
             data = json.loads(msg.content) or {'text': ""}
             resp = self.robot.send_msg(data['text'])
             if "errmsg" in resp:
-                print(f"[Relay] error message: {msg.content}")
+                print(f"[Relay] error message: {resp['errmsg']}")
+                self.feishu.reply_text(msg.message_id, resp['errmsg'])
                 return
             if 'message' in resp:
                 self.feishu.reply_text(msg.message_id, resp['message'])
@@ -186,8 +223,13 @@ class RelayHandle:
             data = json.loads(msg.content) or {'image_key': ""}
             resp = self.feishu.save_image(msg.message_id, data['image_key'])
             if resp.success():
-                # todo 发送图片到机器人
-                print(f"[Relay] reply image: {msg.content}, resp: {resp}")
+                resp = self.robot.send_file(uploads=[resp.file_name])
+                if "errmsg" in resp:
+                    print(f"[Relay] error message: {msg.content}")
+                    return
+                if 'message' in resp:
+                    self.feishu.reply_text(msg.message_id, resp['message'])
+                    print(f"[Relay] reply image: {msg.content}, resp: {resp}")
         except Exception as e:
             print(f"[Relay] failed to reply image: {msg.content}, error: {e}")
     

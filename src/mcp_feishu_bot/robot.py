@@ -83,8 +83,11 @@ class RobotClient:
             self._loop.call_soon_threadsafe(self._loop.stop)
         except Exception:
             pass
+    
+    def send_file(self, uploads: list, session: str = "feishu-bot") -> Optional[Dict[str, Any]]:
+        return self.send_msg(content="", uploads=uploads, session=session)
 
-    def send_msg(self, content: str, session: str = "feishu-bot") -> Optional[Dict[str, Any]]:
+    def send_msg(self, content: str, uploads: Optional[list] = [], session: str = "feishu-bot") -> Optional[Dict[str, Any]]:
         """
         意图识别（HTTP POST /api/intent）。
 
@@ -106,6 +109,7 @@ class RobotClient:
         body: Dict[str, str] = {
             "content": content,
             "session": session,
+            "uploads": uploads,
         }
 
         print(f"[Robot] intent request: content='{content}'")
