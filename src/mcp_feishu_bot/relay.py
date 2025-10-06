@@ -71,7 +71,9 @@ class RelayHandle:
                 "user-input", "hello",
                 "stream", "change",
             ]
-            if action == "errors":
+            if action == "stream":
+                pass
+            elif action == "errors":
                 self._on_errors(action, detail, sessid)
             elif action == "respond":
                 self._on_respond(action, detail, sessid)
@@ -81,6 +83,8 @@ class RelayHandle:
                 print(f"[Relay] connect success: {detail}")
             elif action not in act_list:
                 print(f"[Relay] unknown action: {action}, payload: {payload}")
+            else:
+                print(f"[Relay] unknown method: {method}, payload: {payload}")
         except Exception as e:
             print(f"[Relay] error: {e}, payload: {payload}")
 
@@ -149,9 +153,6 @@ class RelayHandle:
         if not isinstance(detail, dict):
             print(f"[Relay] unknown detail: {detail}")
             return
-        if sessid not in self._cached_sessions:
-            print(f"[Relay] missing session: {detail}")
-            return
 
         # send respond to feishu
         card_head = {
@@ -195,6 +196,8 @@ class RelayHandle:
                 receive_id_type="open_id",
             )
             print(f"[Relay] respond task={sessid}, action={action}, open_id={user.open_id}")
+        else:
+            print(f"[Relay] respond task={sessid}, action={action}, no user_id")
 
     def _on_control(self, action: Optional[str], detail: Any, sessid: Optional[str]) -> None:
         print(f"[Relay] control {sessid}, {action}, {detail}")

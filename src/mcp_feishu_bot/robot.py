@@ -10,11 +10,10 @@ Robot WS Client (Custom Protocol)
 - 线程托管 asyncio 事件循环，提供同步友好的 start/stop/send 接口
 """
 
-import websockets
-import json, time
-import os, secrets
-import asyncio, threading
+import json, os, threading, time
+import asyncio, websockets
 import urllib.request, urllib.error
+from websockets.exceptions import ConnectionClosed, ConnectionClosedError, ConnectionClosedOK
 from typing import Optional, Callable, Dict, Any
 
 
@@ -28,8 +27,10 @@ class RobotClient:
     """
 
     # 固定常量（如需调整可直接改这里）
+    HEARTBEAT_INTERVAL: int = 5
+    RECONNECT_COOLDOWN: int = 3
     DEFAULT_HEADERS: Dict[str, str] = {}
-    HEARTBEAT_INTERVAL: int = 30
+    # 快速重连信号的最小触发间隔（秒），避免高频信号导致刷屏
 
     SOURCE = 'im-proxy'
 
@@ -51,6 +52,13 @@ class RobotClient:
         self._ws: Optional[websockets.WebSocketClientProtocol] = None
         self._stop = threading.Event()
         self._send_lock = threading.Lock()
+        # 外部快速重连信号：用于从退避等待中提前唤醒
+        self._reconnect_signal = threading.Event()
+        # 日志与信号节流
+        self._last_reconnect_ts: float = 0.0
+        self._last_error_log_ts: float = 0.0
+        self._last_close_log_ts: float = 0.0
+        self._connected: bool = False
         self._on_event = on_event
 
     # ---------- Public API ----------
@@ -129,6 +137,12 @@ class RobotClient:
         except Exception as e:
             result = {"errmsg": str(e)}
         print(f"[Robot] intent response: {result}")
+        # 如果意图识别成功，且长连接断开，则尝试触发快速重连
+        try:
+            if not result.get("errmsg"):
+                self._ensure_ws_connected()
+        except Exception:
+            pass
         return result
 
     def send_json(self, data: Dict[str, Any]) -> bool:
@@ -158,16 +172,16 @@ class RobotClient:
 
     # ---------- Internal ----------
     async def _run(self) -> None:
-        backoff = 1
         while not self._stop.is_set():
             try:
                 # 建立连接
+                print(f"[Robot] connecting to {self.ws_url}...")
                 self._ws = await websockets.connect(
                     self.ws_url, max_size=8 * 1024 * 1024,
                     ping_interval=self.heartbeat_interval,
                     ping_timeout=10, close_timeout=5,
+                    open_timeout=10,
                 )
-                backoff = 1  # 重置退避
                 self._handle_open()
 
                 # 接收循环
@@ -177,6 +191,13 @@ class RobotClient:
                         parsed = self._try_parse_json(message)
                     if parsed and self._on_event:
                         self._on_event(parsed)
+                # 循环正常结束（可能是服务端主动关闭连接）时记录关闭信息
+                try:
+                    code = getattr(self._ws, "close_code", None)
+                    reason = getattr(self._ws, "close_reason", None)
+                    print(f"[Robot] server closed connection code={code} reason={reason}")
+                except Exception:
+                    print("[Robot] server closed connection (no code/reason)")
             except Exception as e:
                 self._handle_error(e)
 
@@ -186,10 +207,6 @@ class RobotClient:
 
             if not self.reconnect or self._stop.is_set():
                 break
-
-            # 指数退避重连
-            time.sleep(backoff)
-            backoff = min(backoff * 2, 30)
 
     @staticmethod
     def _try_parse_json(s: Any) -> Optional[Dict[str, Any]]:
@@ -213,6 +230,7 @@ class RobotClient:
     # ---------- Internal handlers ----------
     def _handle_open(self) -> None:
         try:
+            self._connected = True
             print("[Robot] connected")
             self.send_json({
                 "method": "system", "action": "hello", 
@@ -223,12 +241,68 @@ class RobotClient:
 
     def _handle_close(self) -> None:
         try:
-            print("[Robot] disconnected")
+            # 仅在确实建立过连接且当前连接已关闭时打印，并做节流
+            if not self._ws:
+                return
+            is_closed = True
+            try:
+                is_closed = getattr(self._ws, "closed", True)
+            except Exception:
+                pass
+            if self._connected and is_closed:
+                now = time.time()
+                if now - self._last_close_log_ts >= 2.0:
+                    self._last_close_log_ts = now
+                    code = getattr(self._ws, "close_code", None)
+                    reason = getattr(self._ws, "close_reason", None)
+                    print(f"[Robot] disconnected code={code} reason={reason}")
+            self._connected = False
         except Exception:
             pass
 
     def _handle_error(self, e: Exception) -> None:
         try:
-            print(f"[Robot] connection error: {e}")
+            now = time.time()
+            # 限制错误日志打印频率（每 2 秒最多一次）
+            if now - self._last_error_log_ts >= 2.0:
+                self._last_error_log_ts = now
+                if isinstance(e, (ConnectionClosed, ConnectionClosedError, ConnectionClosedOK)):
+                    code = getattr(e, 'code', None)
+                    reason = getattr(e, 'reason', None)
+                    print(f"[Robot] connection closed (exception) code={code} reason={reason}")
         except Exception:
             pass
+
+    # ---------- Utilities ----------
+    def _is_ws_connected(self) -> bool:
+        """判断当前 WS 是否处于连接状态。"""
+        ws = self._ws
+        try:
+            return ws is not None and not getattr(ws, "closed", False)
+        except Exception:
+            return False
+
+    def _ensure_ws_connected(self) -> None:
+        """在需要时触发快速重连；若线程未运行则启动。"""
+        # 若已请求停止，不做重连
+        if self._stop.is_set():
+            return
+        # 若后台线程未运行，直接启动
+        if not self._thread or not self._thread.is_alive():
+            try:
+                print("[Robot] WS thread not running, restarting...")
+                self.start()
+                return
+            except Exception:
+                pass
+        # 若 WS 未连接/已关闭，设置快速重连信号（带冷却）
+        if not self._is_ws_connected():
+            try:
+                now = time.time()
+                # 在冷却时间内不重复发送快速重连信号，避免频繁重试
+                if (not self._reconnect_signal.is_set()) and (now - self._last_reconnect_ts >= self.RECONNECT_COOLDOWN):
+                    print("[Robot] WS lost, signaling fast reconnect...")
+                    self._reconnect_signal.set()
+                    self._last_reconnect_ts = now
+            except Exception:
+                pass
