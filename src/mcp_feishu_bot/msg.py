@@ -32,7 +32,9 @@ from lark_oapi.api.im.v1 import (
 )
 
 from mcp_feishu_bot.client import FeishuClient
+from fastmcp.utilities.logging import get_logger
 
+logger = get_logger(__name__)
 
 class MsgHandle(FeishuClient):
     """
@@ -59,11 +61,12 @@ class MsgHandle(FeishuClient):
                 json.loads(content)
             except (json.JSONDecodeError, ValueError):
                 meta= { 'text': content }
-                content = json.dumps(meta, ensure_ascii=False)
+                content = json.dumps(meta)
         else:
-            content = json.dumps(content, ensure_ascii=False)
+            content = json.dumps(content)
 
         # build payload
+        logger.info(f"[MSG] send text: {content}")
         body = CreateMessageRequestBody.builder() \
                 .content(content).msg_type(msg_type) \
                 .receive_id(receive_id).build()
@@ -87,11 +90,12 @@ class MsgHandle(FeishuClient):
             Dictionary containing the result of the file sending operation
         """
         # Check if file exists
+        storage_path = os.environ.get('STORAGE_PATH')
+        os.chdir(storage_path) if storage_path else None
         if not os.path.exists(file_path):
             raise FileNotFoundError(f"File not found: {file_path}")
         
         file_name = os.path.basename(file_path)
-        
         file_body = CreateFileRequestBody.builder() \
             .file_type(file_type).file_name(file_name) \
             .file(open(file_path, 'rb')).build()
@@ -128,7 +132,9 @@ class MsgHandle(FeishuClient):
         Returns:
             Dictionary containing the result of the image sending operation
         """
-        # Check if image file exists
+        # Check if file exists
+        storage_path = os.environ.get('STORAGE_PATH')
+        os.chdir(storage_path) if storage_path else None
         if not os.path.exists(image_path):
             raise FileNotFoundError(f"Image file not found: {image_path}")
         
@@ -154,7 +160,7 @@ class MsgHandle(FeishuClient):
             .request_body(image_body).build()
         return self.http_client.im.v1.message.create(msg_req, msg_opt)
 
-    def send_card(self, receive_id: str, content: Any, 
+    def send_card(self, receive_id: str, content: dict, 
                   receive_id_type: str = "email") -> CreateMessageResponse:
         """
         Send an interactive card message.
@@ -168,15 +174,11 @@ class MsgHandle(FeishuClient):
             CreateMessageResponse
         """
         # Ensure content is a valid JSON string for interactive card
-        if isinstance(content, str):
-            try:
-                json.loads(content)
-            except (json.JSONDecodeError, ValueError):
-                raise ValueError("content must be a valid JSON string for interactive card")
-            content_str = content
-        else:
-            content_str = json.dumps(content, ensure_ascii=False)
+        if not isinstance(content, dict):
+            raise ValueError("content must be a valid JSON string for interactive card")
+
         # send text
+        content_str = json.dumps(self._build_card(content), ensure_ascii=False)
         return self.send_text(receive_id, content_str, "interactive", receive_id_type)
 
     def reply_text(self, message_id: str, content: str, msg_type: str = "text") -> ReplyMessageResponse:
@@ -248,13 +250,13 @@ class MsgHandle(FeishuClient):
 
         response = self.http_client.im.v1.message_resource.get(request)
         if response.success():
-            base_path = os.environ.get("STORAGE_PATH", "./")
-            if response.file_name:
-                file_name = f"{base_path}/{response.file_name}"
+            storage_path = os.environ.get('STORAGE_PATH')
+            os.chdir(storage_path) if storage_path else None
+            if not response.file_name:
+                response.file_name = f"file-{message_id}.raw"
             elif message_type == "image":
                 response.file_name = f"image-{message_id}.png"
-                file_name = f"{base_path}/{response.file_name}"
-            f = open(f"{file_name}", "wb")
+            f = open(f"{response.file_name}", "wb")
             f.write(response.file.read())
             f.close()
         return response
@@ -269,9 +271,22 @@ class MsgHandle(FeishuClient):
         """
         return self.save_file(message_id, file_key, "image")
 
-    def build_card(self, data: dict) -> str:
+    def _build_card(self, data: dict) -> str:
         """
         Build an interactive card message.
+        The card content must conform to schema 2.0.
+        card template: {
+            head: {
+                "tags": "DONE",
+                "color": "blue",
+                "title": "MCP 助手"
+            },
+            body: '## Hi, nice to meet you!',
+            foot: {
+                "text": "Click Me",
+                "link": "https://www.feishu.cn/"
+            }
+        }
 
         Args:
             content: Card content as dict or JSON string (must conform to schema 2.0)
@@ -292,26 +307,57 @@ class MsgHandle(FeishuClient):
             },
             "fallback": {}
         }
-        if 'title' in data:
-            result['header'] = {
+
+        # start build header
+        head = data.get('head', {})
+        if 'color' not in head:
+            head['color'] = "blue"
+        if 'title' in head:
+            result['header']['title'] = {
                 "tag": "plain_text",
-                "content": data['title']   
+                "content": head['title']
             }
+            # 标题主题样式颜色。支持如下颜色，默认值 default：
+            # "blue"|"wathet"|"turquoise"|"green"|"yellow"|
+            # "orange"|"red"|"carmine"|"violet"|"purple"|
+            # "indigo"|"grey"|"default"
+            result['header']['template'] = head['color']
+        if 'subtitle' in head:
+            result['header']['subtitle'] = {
+                "tag": "plain_text",
+                "content": head['subtitle']
+            }
+        if "tags" in head:
+            tags_list = []
+            for text in head['tags'].split(','):
+                tags_list.append({
+                    "tag": "text_tag",
+                    "color": head['color'],
+                    "text": { # 标签内容
+                        "tag": "plain_text",
+                        "content": text
+                    },
+                })
+            result['header']['text_tag_list'] = tags_list
+        
+        # start build body
         elements = []
-        if 'content' in data:
+        if 'body' in data:
             elements.append({
                 "tag": "markdown",
-                "content": data['content'],
+                "content": data['body'],
                 "text_align": "left",
                 "text_size": "normal_v2",
                 "margin": "0px 0px 0px 0px"
             })
-        if 'button' in data:
+        # start build footer
+        foot = data.get('foot', {})
+        if 'text' in foot:
             elements.append({
                 "tag": "button",
                 "text": {
                     "tag": "plain_text",
-                    "content": data['button']
+                    "content": foot['text']
                 },
                 "type": "default",
                 "width": "default",
@@ -319,10 +365,11 @@ class MsgHandle(FeishuClient):
                 "behaviors": [
                     {
                         "type": "open_url",
-                        "default_url": data['action'],
+                        "default_url": foot['link'],
                     }
                 ],
                 "margin": "0px 0px 0px 0px"
             })
         result['body']['elements'] = elements
+        # finish all elements
         return result

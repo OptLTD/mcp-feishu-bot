@@ -13,7 +13,7 @@ from typing import Any, Dict, Optional
 
 import lark_oapi as lark  # 仅用于类型提示与兼容
 from lark_oapi.api.im.v1 import (
-    EventMessage, EventSender,
+    EventMessage, EventSender, UserId,
     P2ImMessageReceiveV1Data
 )
 
@@ -36,6 +36,8 @@ class RelayHandle:
         #   'timer': threading.Timer|None, 'message_id': str|None } 
         # }
         self._pending_intents: Dict[str, Dict[str, Any]] = {}
+        # 缓存已知会话（chat_id 即 session key），用于简单标记/统计
+        self._cached_sessions: Dict[str, bool] = {}
 
     def set_feishu(self, feishu: MsgHandle) -> None:
         """初始化 Relay 句柄，绑定 Feishu 客户端。"""
@@ -58,20 +60,23 @@ class RelayHandle:
         if method not in method_list:
             return
         
-        taskid = payload.get("taskid")
+        sessid = payload.get("sessid")
         action = payload.get("action")
         detail = payload.get("detail")
+        if sessid not in self._cached_sessions:
+            print(f"[Relay] session err:{sessid}/{detail}")
+            return
         try:
             act_list = [
                 "user-input", "hello",
                 "stream", "change",
             ]
             if action == "errors":
-                self._on_errors(action, detail, taskid)
+                self._on_errors(action, detail, sessid)
             elif action == "respond":
-                self._on_respond(action, detail, taskid)
+                self._on_respond(action, detail, sessid)
             elif action == "control":
-                self._on_control(action, detail, taskid)
+                self._on_control(action, detail, sessid)
             elif action == "welcome":
                 print(f"[Relay] connect success: {detail}")
             elif action not in act_list:
@@ -98,11 +103,25 @@ class RelayHandle:
         if now_sec - (msg_ts // 1000) > 600:
             print(f"[Relay] expired message, msg_id={trace_id}")
             return
-
+        
         # Extract message information
-        message = payload.message
         sender = payload.sender
+        message = payload.message
         msg_type = message.message_type
+        chat_id = payload.message.chat_id
+        if chat_id not in self._cached_sessions:
+            self._cached_sessions[chat_id] = {
+                'user_id':sender.sender_id,
+                'create_time': message.create_time,
+                'update_time': message.update_time,
+                'is_group': message.chat_type == 'group',
+            }
+        else:
+            # 更新会话的 update_time 为最新消息时间
+            self._cached_sessions[chat_id].update({
+                'update_time': message.update_time,
+            })
+        
         self._seen_trace_ids[trace_id] = now_sec
         if msg_type == "text":
             self._on_text_msg(message, sender)
@@ -122,42 +141,63 @@ class RelayHandle:
                 pass
             
     # ---------- Agent -> Relay ----------
-    def _on_errors(self, action: Optional[str], detail: Any, taskid: Optional[str]) -> None:
-        print(f"[Relay] errors {taskid}, {action}, {detail}")
+    def _on_errors(self, action: Optional[str], detail: Any, session: Optional[str]) -> None:
+        print(f"[Relay] errors {session}, {action}, {detail}")
 
-    def _on_respond(self, action: Optional[str], detail: Dict[str, Any], taskid: Optional[str]) -> None:
+    def _on_respond(self, action: Optional[str], detail: Dict[str, Any], sessid: Optional[str]) -> None:
         # Normalize detail to dict
         if not isinstance(detail, dict):
             print(f"[Relay] unknown detail: {detail}")
             return
+        if sessid not in self._cached_sessions:
+            print(f"[Relay] missing session: {detail}")
+            return
+
+        # send respond to feishu
+        card_head = {
+            "title": "", "tags": "",
+        }
+
         has_tool_result = False
-        content_parts: list[str] = []
+        tool_result: list[str] = []
         for item in detail.get("actions") or []:
             type = item.get("type")
             if type == 'make-ask':
                 has_tool_result = True
                 txt = item.get("question")
-                content_parts.append(txt.strip())
+                tool_result.append(txt.strip())
                 opts = item.get("options") or []
-                content_parts.append("\n".join(opts))
+                tool_result.append("\n".join(opts))
+                card_head['title'] = '寻求帮助'
+                card_head['tags'] = 'HELP'
                 continue
             if type == 'complete':
                 has_tool_result = True
                 txt = item.get("content")
-                content_parts.append(txt.strip())
+                tool_result.append(txt.strip())
+                card_head['title'] = '任务完成'
+                card_head['tags'] = 'DONE'
                 continue
         if not has_tool_result:
             print(f"[Relay] not finish: {detail}")
             return
         
-        # send respond to feishu
-        email="chnwine@qq.com"
-        reply="\n\n".join(content_parts).strip()
-        self.feishu.send_text(content=reply, receive_id=email)
-        print(f"[Relay] respond task={taskid}, action={action}")
+        card_detail = {
+            "head": card_head,
+            "body": "\n\n".join(tool_result).strip(),
+        }
+        session = self._cached_sessions[sessid]
+        if session and session['user_id']:
+            user: UserId = session['user_id']
+            self.feishu.send_card(
+                content=card_detail, 
+                receive_id=user.open_id, 
+                receive_id_type="open_id",
+            )
+            print(f"[Relay] respond task={sessid}, action={action}, open_id={user.open_id}")
 
-    def _on_control(self, action: Optional[str], detail: Any, taskid: Optional[str]) -> None:
-        print(f"[Relay] control {taskid}, {action}, {detail}")
+    def _on_control(self, action: Optional[str], detail: Any, sessid: Optional[str]) -> None:
+        print(f"[Relay] control {sessid}, {action}, {detail}")
 
     # ---------- Feishu -> Relay ----------
     def _on_custom_event(self, data: lark.CustomizedEvent) -> None:
@@ -203,13 +243,21 @@ class RelayHandle:
             if (state.get('uploads') or []) and not state.get('text'):
                 # 合并上下文调用机器人 并清理状态
                 uploads = list(state.get('uploads') or [])
-                intent = self.robot.get_intent(data['text'], uploads=uploads)
+                # 传递 chat_id 作为会话标识，避免多用户串话
+                intent = self.robot.get_intent(
+                    content=data['text'], 
+                    uploads=uploads, 
+                    session=msg.chat_id
+                )
                 if state.get('timer'):
                     state.get('timer').cancel()
                 self._pending_intents.pop(msg.chat_id, None)
             else:
                 # 直接意图识别
-                intent = self.robot.get_intent(data['text'])
+                intent = self.robot.get_intent(
+                    content=data['text'], 
+                    session=msg.chat_id
+                )
 
             if "errmsg" in intent and intent['errmsg']:
                 print(f"[Relay] error message: {intent['errmsg']}")
@@ -308,7 +356,12 @@ class RelayHandle:
             return
         
         try:
-            resp = self.robot.get_intent(state['text'], uploads=state['uploads'])
+            # 上传与文字合并时也传递会话标识
+            resp = self.robot.get_intent(
+                content=state['text'], 
+                uploads=state['uploads'], 
+                session=chat_id
+            )
             if 'message' in resp and resp['message']:
                 self.feishu.reply_text(msg_id, resp['message'])
             if 'emoji' in resp and resp['emoji']:
@@ -358,11 +411,13 @@ class RelayHandle:
             return
         # 如果仍未有附件，触发一次仅文本的处理并清理状态
         try:
-            resp = self.robot.get_intent(text)
-            msg_id = state.get('message_id')
+            # 纯文本处理同样携带会话，避免上下文串话
+            resp = self.robot.get_intent(text, session=chat_id)
             if 'message' in resp:
+                msg_id = state.get('message_id')
                 self.feishu.reply_text(msg_id, resp['message'])
             if 'emoji' in resp:
+                msg_id = state.get('message_id')
                 self.feishu.reply_emoji(msg_id, resp['emoji'])
             print(f"[Relay] wait-timeout proceed text-only: {resp}")
         except Exception as ex:

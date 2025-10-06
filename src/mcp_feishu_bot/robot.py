@@ -31,10 +31,13 @@ class RobotClient:
     DEFAULT_HEADERS: Dict[str, str] = {}
     HEARTBEAT_INTERVAL: int = 30
 
+    SOURCE = 'im-proxy'
+
     def __init__(self, host: str, reconnect: bool = True, on_event: Optional[Callable[[str, Dict[str, Any]], None]] = None,
                  worker_id: Optional[str] = None, home_path: Optional[str] = None) -> None:
+        uri = f'socket?source={self.SOURCE}'
         self.base_url = f"http://{host}"
-        self.ws_url = f"ws://{host}/socket"
+        self.ws_url = f"ws://{host}/{uri}"
         self.reconnect = reconnect
         self.headers = self.DEFAULT_HEADERS
         self.heartbeat_interval = self.HEARTBEAT_INTERVAL
@@ -104,6 +107,7 @@ class RobotClient:
         """
         url = f"{self.base_url}/api/intent"
         body: Dict[str, str] = {
+            "source": self.SOURCE,
             "content": content,
             "session": session,
             "uploads": uploads,

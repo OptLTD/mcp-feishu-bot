@@ -131,10 +131,12 @@ def chat_send_text(receive_id: str, content: str, receive_id_type: str = "email"
     
     try:
         resp = msg_client.send_text(
-            content, receive_id, receive_id_type
+            receive_id=receive_id, content=content, 
+            receive_id_type=receive_id_type
         )
         if not resp.success():
             return f"# error: Failed to send message: {resp.error}"
+        return "# ok: Message sent successfully"
     except Exception as e:
         return f"# error: Failed to send message: {str(e)}"
 
@@ -159,10 +161,12 @@ def chat_send_image(receive_id: str, image_path: str, receive_id_type: str = "em
     
     try:
         resp = msg_client.send_image(
-            image_path, receive_id, receive_id_type
+             receive_id=receive_id, image_path=image_path, 
+            receive_id_type=receive_id_type
         )
         if not resp.success():
             return f"# error: Failed to send image: {resp.error}"
+        return "# ok: Image sent successfully"
     except Exception as e:
         return f"# error: Failed to send image: {str(e)}"
 
@@ -188,23 +192,36 @@ def chat_send_file(receive_id: str, file_path: str, receive_id_type: str = "emai
     
     try:
         resp = msg_client.send_file(
-            file_path, receive_id, receive_id_type, file_type
+            receive_id=receive_id, receive_id_type=receive_id_type,
+            file_path=file_path,  file_type=file_type
         )
         if not resp.success():
             return f"# error: Failed to send file: {resp.error}"
+        return "# ok: File sent successfully"
     except Exception as e:
         return f"# error: Failed to send file: {str(e)}"
 
 
 @mcp.tool
-def chat_send_card(receive_id: str, content: str, receive_id_type: str = "email") -> str:
+def chat_send_card(receive_id: str, content: dict, receive_id_type: str = "email") -> str:
     """
     [Feishu/Lark] Send an interactive card message.
 
     Args:
         receive_id: The ID of the message receiver (user_id, open_id, union_id, email, chat_id)
-        content: The interactive card content as JSON string (schema 2.0)
         receive_id_type: Type of receiver ID (open_id, user_id, union_id, email, chat_id)
+        content: The interactive card content(dict object),cart content just like this: {
+            head: {
+                "tags": "DONE",
+                "color": "blue",
+                "title": "MCP 助手"
+            },
+            body: '## Hi, nice to meet you!',
+            foot: {
+                "text": "Click Me",
+                "link": "https://www.feishu.cn/"
+            }
+        }
 
     Returns:
         Markdown string containing the result of the message sending operation
@@ -215,15 +232,8 @@ def chat_send_card(receive_id: str, content: str, receive_id_type: str = "email"
         return "# error: Feishu client not configured\nPlease set FEISHU_APP_ID and FEISHU_APP_SECRET environment variables."
 
     try:
-        # Validate JSON early for clearer error messages
-        try:
-            json.loads(content)
-        except Exception:
-            return "# error: Invalid card content JSON. Please provide a valid schema 2.0 JSON string."
-
         resp = msg_client.send_card(
-            receive_id=receive_id,
-            content=content,
+            receive_id=receive_id, content=content,
             receive_id_type=receive_id_type,
         )
         if not resp.success():
