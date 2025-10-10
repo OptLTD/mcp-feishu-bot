@@ -133,7 +133,7 @@ class FeishuClient:
                 self.app_id, 
                 self.app_secret,
                 event_handler=self._event_handler,
-                log_level=lark.LogLevel.DEBUG
+                log_level=lark.LogLevel.ERROR
             )
             
             # Start connection in a separate thread

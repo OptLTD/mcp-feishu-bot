@@ -128,6 +128,14 @@ def setup_file_logging() -> None:
     level = getattr(logging, level_name, logging.INFO)
     root_logger.setLevel(level)
 
+    # Remove StreamHandlers to avoid writing to STDOUT which may corrupt MCP JSON frames
+    try:
+        for h in list(root_logger.handlers):
+            if isinstance(h, logging.StreamHandler) and not isinstance(h, RotatingFileHandler):
+                root_logger.removeHandler(h)
+    except Exception:
+        pass
+
     # Avoid adding duplicate handlers for the same file
     exists = False
     for h in root_logger.handlers:
@@ -577,11 +585,6 @@ def bitable_delete_fields(app_token: str, table_id: str, field_ids: list[str] = 
     bitable_handle = bitable_clients[app_token].use_table(table_id)
     return bitable_handle.describe_delete_fields(field_ids=field_ids)
 
-if __name__ == "__main__":
-    # Allow direct execution via python -m or script run
-    main()
-# ---------------- Wiki Tools ----------------
-
 @mcp.tool
 def wiki_doc_content(doc_token: str) -> str:
     """
@@ -596,3 +599,8 @@ def wiki_doc_content(doc_token: str) -> str:
     if not wiki_client:
         return "# error: Feishu client not configured\nPlease set FEISHU_APP_ID and FEISHU_APP_SECRET environment variables."
     return wiki_client.describe_get_content(doc_token=doc_token)
+
+
+if __name__ == "__main__":
+    # Allow direct execution via python -m or script run
+    main()
