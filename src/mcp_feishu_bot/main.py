@@ -16,11 +16,12 @@ warnings.filterwarnings("ignore", category=DeprecationWarning)
 
 from fastmcp import FastMCP
 from .msg import MsgHandle
+from .wiki import WikiHandle
 from .drive import DriveHandle
-from .client import FeishuClient
-from .bitable import BitableHandle
 from .robot import RobotClient
 from .relay import RelayHandle
+from .client import FeishuClient
+from .bitable import BitableHandle
 from fastmcp.utilities.logging import get_logger
 
 # Initialize FastMCP server
@@ -31,6 +32,7 @@ logger = get_logger(__name__)
 
 # Initialize global Feishu clients
 msg_client: Optional[MsgHandle] = None
+wiki_client: Optional[WikiHandle] = None
 relay_client: Optional[RelayHandle] = None
 drive_client: Optional[DriveHandle] = None
 robot_client: Optional[RobotClient] = None
@@ -40,10 +42,8 @@ bitable_clients: Optional[dict[str, BitableHandle]] = {}
 def initialize_agent_client(relay_handle: RelayHandle) -> Optional[RobotClient]:
     global robot_client
    
-    msg_server = os.getenv("FEISHU_MSG_SERVER")
-    robot_host = os.getenv("FEISHU_ROBOT_HOST")
     # Guard against None for msg_server to avoid AttributeError
-    if msg_server and msg_server.upper() == "ON" and robot_host:
+    if robot_host := os.getenv("FEISHU_ROBOT_HOST"):
         robot_client = RobotClient(
             host=robot_host, reconnect=True,
             on_event=relay_handle.on_robot_event,
@@ -66,12 +66,10 @@ def cleanup_agent_client():
         logger.warning(f"Failed to stop Agent WS: {e}")
 
 def initialize_feishu_client(relay_handle: RelayHandle) -> Optional[FeishuClient]:
-    global feishu_client, msg_client, drive_client 
+    global feishu_client, msg_client, drive_client, wiki_client 
     
     app_id = os.getenv("FEISHU_APP_ID")
     app_secret = os.getenv("FEISHU_APP_SECRET")
-    msg_server = os.getenv("FEISHU_MSG_SERVER")
-    
     if not app_id or not app_secret:
         logger.warning("FEISHU_APP_ID and FEISHU_APP_SECRET not configured")
         return None
@@ -84,12 +82,13 @@ def initialize_feishu_client(relay_handle: RelayHandle) -> Optional[FeishuClient
         # Initialize specialized clients
         msg_client = MsgHandle(app_id, app_secret)
         drive_client = DriveHandle(app_id, app_secret)
+        wiki_client = WikiHandle(app_id, app_secret)
     except Exception as e:
         logger.error(f"Failed to initialize Feishu client: {str(e)}")
         return None
     
     # Start long connection if enabled
-    if msg_server and msg_server.upper() == "ON":
+    if os.getenv("FEISHU_ROBOT_HOST") != '':
         # Auto-start long connection when server initializes
         if feishu_client.start_long_connection():
             logger.info("Feishu long connection started successfully")
@@ -112,7 +111,11 @@ atexit.register(cleanup_agent_client)
 
 def setup_file_logging() -> None:
     """Configure rotating file logging for the application."""
-    log_dir = os.environ.get("LOG_DIR", os.path.join(os.getcwd(), "logs"))
+    # Prefer STOARGE_PATH/.logs if STOARGE_PATH is set; otherwise use ~/.logs
+    if storage_path := os.environ.get("STOARGE_PATH"):
+        log_dir = os.path.join(storage_path, ".logs")
+    else:
+        log_dir = os.path.join(os.path.expanduser("~"), ".logs")
     try:
         os.makedirs(log_dir, exist_ok=True)
     except Exception:
@@ -577,3 +580,19 @@ def bitable_delete_fields(app_token: str, table_id: str, field_ids: list[str] = 
 if __name__ == "__main__":
     # Allow direct execution via python -m or script run
     main()
+# ---------------- Wiki Tools ----------------
+
+@mcp.tool
+def wiki_doc_content(doc_token: str) -> str:
+    """
+    [Feishu/Lark] Get document content by token and return Markdown.
+
+    Args:
+        doc_token: Token of the document
+
+    Returns:
+        Markdown string containing the document content
+    """
+    if not wiki_client:
+        return "# error: Feishu client not configured\nPlease set FEISHU_APP_ID and FEISHU_APP_SECRET environment variables."
+    return wiki_client.describe_get_content(doc_token=doc_token)
