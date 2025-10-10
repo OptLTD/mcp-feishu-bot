@@ -17,6 +17,9 @@ from typing import Optional, Callable, Dict, Any
 warnings.filterwarnings("ignore", category=DeprecationWarning)
 
 import lark_oapi as lark
+from fastmcp.utilities.logging import get_logger
+
+logger = get_logger(__name__)
 
 
 class FeishuClient:
@@ -108,7 +111,7 @@ class FeishuClient:
         Args:
             data: Custom event data
         """
-        print(f'[Custom Event] type: {data.type}, data: {lark.JSON.marshal(data, indent=4)}')
+        logger.info(f"[Custom Event] type: {data.type}, data: {lark.JSON.marshal(data, indent=4)}")
  
     def start_long_connection(self) -> bool:
         """
@@ -119,7 +122,7 @@ class FeishuClient:
         """
         try:
             if self._is_connected:
-                print("[Warning] Long connection is already active")
+                logger.warning("Long connection is already active")
                 return True
             
             # Build event handler
@@ -137,10 +140,10 @@ class FeishuClient:
             def start_connection():
                 try:
                     self._is_connected = True
-                    print("[Info] Starting Feishu long connection...")
+                    logger.info("Starting Feishu long connection...")
                     self._ws_client.start()
                 except Exception as e:
-                    print(f"[Error] Long connection failed: {str(e)}")
+                    logger.error(f"Long connection failed: {str(e)}")
                     self._is_connected = False
             
             connection_thread = threading.Thread(target=start_connection, daemon=True)
@@ -149,7 +152,7 @@ class FeishuClient:
             return True
             
         except Exception as e:
-            print(f"[Error] Failed to start long connection: {str(e)}")
+            logger.error(f"Failed to start long connection: {str(e)}")
             return False
     
     def stop_long_connection(self) -> bool:
@@ -161,20 +164,20 @@ class FeishuClient:
         """
         try:
             if not self._is_connected:
-                print("[Warning] Long connection is not active")
+                logger.warning("Long connection is not active")
                 return True
             
             if self._ws_client:
                 # Note: The SDK might not have a direct stop method
                 # This is a placeholder for connection cleanup
                 self._is_connected = False
-                print("[Info] Long connection stopped")
+                logger.info("Long connection stopped")
                 return True
             
             return False
             
         except Exception as e:
-            print(f"[Error] Failed to stop long connection: {str(e)}")
+            logger.error(f"Failed to stop long connection: {str(e)}")
             return False
     
     def is_connected(self) -> bool:

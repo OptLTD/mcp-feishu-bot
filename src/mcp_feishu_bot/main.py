@@ -7,6 +7,8 @@ Provides tools for sending messages, images, and files through Feishu API with a
 """
 
 import os, atexit, warnings 
+import logging
+from logging.handlers import RotatingFileHandler
 from typing import Optional
 
 # Additional runtime warning suppression as backup
@@ -19,9 +21,13 @@ from .client import FeishuClient
 from .bitable import BitableHandle
 from .robot import RobotClient
 from .relay import RelayHandle
+from fastmcp.utilities.logging import get_logger
 
 # Initialize FastMCP server
 mcp = FastMCP("Feishu MCP Server")
+
+# Module logger
+logger = get_logger(__name__)
 
 # Initialize global Feishu clients
 msg_client: Optional[MsgHandle] = None
@@ -43,9 +49,9 @@ def initialize_agent_client(relay_handle: RelayHandle) -> Optional[RobotClient]:
             on_event=relay_handle.on_robot_event,
         )
         robot_client.start()
-        print("[Info] Robot WS long connection started")
+        logger.info("Robot WS long connection started")
     else:
-        print("[Info] Robot WS long connection not started")
+        logger.info("Robot WS long connection not started")
 
     relay_handle.set_robot(robot_client)
     return robot_client
@@ -55,9 +61,9 @@ def cleanup_agent_client():
     try:
         if robot_client:
             robot_client.stop()
-            print("[Info] Agent WS long connection stopped")
+            logger.info("Agent WS long connection stopped")
     except Exception as e:
-        print(f"[Warning] Failed to stop Agent WS: {e}")
+        logger.warning(f"Failed to stop Agent WS: {e}")
 
 def initialize_feishu_client(relay_handle: RelayHandle) -> Optional[FeishuClient]:
     global feishu_client, msg_client, drive_client 
@@ -67,7 +73,7 @@ def initialize_feishu_client(relay_handle: RelayHandle) -> Optional[FeishuClient
     msg_server = os.getenv("FEISHU_MSG_SERVER")
     
     if not app_id or not app_secret:
-        print("[Warning] FEISHU_APP_ID and FEISHU_APP_SECRET not configured")
+        logger.warning("FEISHU_APP_ID and FEISHU_APP_SECRET not configured")
         return None
     
     try:
@@ -79,16 +85,16 @@ def initialize_feishu_client(relay_handle: RelayHandle) -> Optional[FeishuClient
         msg_client = MsgHandle(app_id, app_secret)
         drive_client = DriveHandle(app_id, app_secret)
     except Exception as e:
-        print(f"[Error] Failed to initialize Feishu client: {str(e)}")
+        logger.error(f"Failed to initialize Feishu client: {str(e)}")
         return None
     
     # Start long connection if enabled
     if msg_server and msg_server.upper() == "ON":
         # Auto-start long connection when server initializes
         if feishu_client.start_long_connection():
-            print("[Info] Feishu long connection started successfully")
+            logger.info("Feishu long connection started successfully")
         else:
-            print("[Warning] Failed to start Feishu long connection")
+            logger.warning("Failed to start Feishu long connection")
 
     # finally set the msg_client to relay_handle
     relay_handle.set_feishu(msg_client)
@@ -98,13 +104,46 @@ def cleanup_feishu_client():
     global feishu_client
     if feishu_client and feishu_client.is_connected():
         feishu_client.stop_long_connection()
-        print("[Info] Feishu long connection stopped")
+        logger.info("Feishu long connection stopped")
 
 # Register cleanup function to run on exit
 atexit.register(cleanup_feishu_client)
 atexit.register(cleanup_agent_client)
 
+def setup_file_logging() -> None:
+    """Configure rotating file logging for the application."""
+    log_dir = os.environ.get("LOG_DIR", os.path.join(os.getcwd(), "logs"))
+    try:
+        os.makedirs(log_dir, exist_ok=True)
+    except Exception:
+        pass
+    log_file = os.path.join(log_dir, "mcp-feishu-bot.log")
+
+    root_logger = logging.getLogger()
+    # Default to INFO if not specified
+    level_name = os.environ.get("LOG_LEVEL", "INFO").upper()
+    level = getattr(logging, level_name, logging.INFO)
+    root_logger.setLevel(level)
+
+    # Avoid adding duplicate handlers for the same file
+    exists = False
+    for h in root_logger.handlers:
+        if isinstance(h, RotatingFileHandler):
+            try:
+                if os.path.abspath(getattr(h, "baseFilename", "")) == os.path.abspath(log_file):
+                    exists = True
+                    break
+            except Exception:
+                continue
+    if not exists:
+        fh = RotatingFileHandler(log_file, maxBytes=5 * 1024 * 1024, backupCount=3, encoding="utf-8")
+        fmt = logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s")
+        fh.setFormatter(fmt)
+        fh.setLevel(level)
+        root_logger.addHandler(fh)
+
 def main() -> None:
+    setup_file_logging()
     relay_handle = RelayHandle()
     initialize_agent_client(relay_handle)
     initialize_feishu_client(relay_handle)

@@ -15,6 +15,9 @@ import asyncio, websockets
 import urllib.request, urllib.error
 from websockets.exceptions import ConnectionClosed, ConnectionClosedError, ConnectionClosedOK
 from typing import Optional, Callable, Dict, Any
+from fastmcp.utilities.logging import get_logger
+
+logger = get_logger(__name__)
 
 
 class RobotClient:
@@ -65,7 +68,7 @@ class RobotClient:
     def start(self) -> None:
         """启动后台线程并建立长连接（异步运行）。"""
         if self._thread and self._thread.is_alive():
-            print("[Robot] already running")
+            logger.info("[Robot] already running")
             return
 
         self._stop.clear()
@@ -121,7 +124,7 @@ class RobotClient:
             "uploads": uploads,
         }
 
-        print(f"[Robot] intent request: content='{content}, uploads={uploads}'")
+        logger.info(f"intent request: content='{content}, uploads={uploads}'")
         payload = json.dumps(body, ensure_ascii=False)
         req = urllib.request.Request(
             url=url, data=payload.encode("utf-8"), method="POST",
@@ -136,7 +139,7 @@ class RobotClient:
             result = json.loads(data)
         except Exception as e:
             result = {"errmsg": str(e)}
-        print(f"[Robot] intent response: {result}")
+        logger.info(f"intent response: {result}")
         # 如果意图识别成功，且长连接断开，则尝试触发快速重连
         try:
             if not result.get("errmsg"):
@@ -151,13 +154,13 @@ class RobotClient:
             payload = json.dumps(data, ensure_ascii=False)
             return self.send_text(payload)
         except Exception as e:
-            print(f"[Robot] send_json encode error: {e}")
+            logger.error(f"send_json encode error: {e}")
             return False
 
     def send_text(self, text: str) -> bool:
         """发送文本消息"""
         if not self._loop or not self._ws:
-            print("[Robot] not connected")
+            logger.warning("not connected")
             return False
         with self._send_lock:
             fut = asyncio.run_coroutine_threadsafe(
@@ -167,7 +170,7 @@ class RobotClient:
                 fut.result(timeout=5)
                 return True
             except Exception as e:
-                print(f"[Robot] send_text error: {e}")
+                logger.error(f"send_text error: {e}")
                 return False
 
     # ---------- Internal ----------
@@ -175,7 +178,7 @@ class RobotClient:
         while not self._stop.is_set():
             try:
                 # 建立连接
-                print(f"[Robot] connecting to {self.ws_url}...")
+                logger.info(f"connecting to {self.ws_url}...")
                 self._ws = await websockets.connect(
                     self.ws_url, max_size=8 * 1024 * 1024,
                     ping_interval=self.heartbeat_interval,
@@ -195,9 +198,9 @@ class RobotClient:
                 try:
                     code = getattr(self._ws, "close_code", None)
                     reason = getattr(self._ws, "close_reason", None)
-                    print(f"[Robot] server closed connection code={code} reason={reason}")
+                    logger.warning(f"server closed connection code={code} reason={reason}")
                 except Exception:
-                    print("[Robot] server closed connection (no code/reason)")
+                    logger.warning("server closed connection (no code/reason)")
             except Exception as e:
                 self._handle_error(e)
 
@@ -231,7 +234,7 @@ class RobotClient:
     def _handle_open(self) -> None:
         try:
             self._connected = True
-            print("[Robot] connected")
+            logger.info("connected")
             self.send_json({
                 "method": "system", "action": "hello", 
                 "detail": "hi, i am mcp-feishu-bot",
@@ -255,7 +258,7 @@ class RobotClient:
                     self._last_close_log_ts = now
                     code = getattr(self._ws, "close_code", None)
                     reason = getattr(self._ws, "close_reason", None)
-                    print(f"[Robot] disconnected code={code} reason={reason}")
+                    logger.warning(f"disconnected code={code} reason={reason}")
             self._connected = False
         except Exception:
             pass
@@ -269,7 +272,7 @@ class RobotClient:
                 if isinstance(e, (ConnectionClosed, ConnectionClosedError, ConnectionClosedOK)):
                     code = getattr(e, 'code', None)
                     reason = getattr(e, 'reason', None)
-                    print(f"[Robot] connection closed (exception) code={code} reason={reason}")
+                    logger.warning(f"connection closed (exception) code={code} reason={reason}")
         except Exception:
             pass
 
@@ -290,7 +293,7 @@ class RobotClient:
         # 若后台线程未运行，直接启动
         if not self._thread or not self._thread.is_alive():
             try:
-                print("[Robot] WS thread not running, restarting...")
+                logger.info("WS thread not running, restarting...")
                 self.start()
                 return
             except Exception:
@@ -301,7 +304,7 @@ class RobotClient:
                 now = time.time()
                 # 在冷却时间内不重复发送快速重连信号，避免频繁重试
                 if (not self._reconnect_signal.is_set()) and (now - self._last_reconnect_ts >= self.RECONNECT_COOLDOWN):
-                    print("[Robot] WS lost, signaling fast reconnect...")
+                    logger.warning("WS lost, signaling fast reconnect...")
                     self._reconnect_signal.set()
                     self._last_reconnect_ts = now
             except Exception:

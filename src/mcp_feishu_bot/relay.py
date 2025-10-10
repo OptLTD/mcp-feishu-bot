@@ -19,6 +19,9 @@ from lark_oapi.api.im.v1 import (
 
 from .robot import RobotClient
 from .msg import MsgHandle
+from fastmcp.utilities.logging import get_logger
+
+logger = get_logger(__name__)
 
 
 class RelayHandle:
@@ -52,7 +55,7 @@ class RelayHandle:
         """处理 Robot 事件，归一化并记录。"""
         # 当无法解析为 JSON 时，按普通消息处理
         if not isinstance(payload, dict):
-            print(f"[Relay] unknown payload: {payload}")
+            logger.warning(f"unknown payload: {payload}")
             return
 
         method = payload.get("method")
@@ -64,7 +67,7 @@ class RelayHandle:
         action = payload.get("action")
         detail = payload.get("detail")
         if sessid not in self._cached_sessions:
-            print(f"[Relay] session err:{sessid}/{detail}")
+            logger.warning(f"session err:{sessid}/{detail}")
             return
         try:
             act_list = [
@@ -80,13 +83,13 @@ class RelayHandle:
             elif action == "control":
                 self._on_control(action, detail, sessid)
             elif action == "welcome":
-                print(f"[Relay] connect success: {detail}")
+                logger.info(f"connect success: {detail}")
             elif action not in act_list:
-                print(f"[Relay] unknown action: {action}, payload: {payload}")
+                logger.warning(f"unknown action: {action}, payload: {payload}")
             else:
-                print(f"[Relay] unknown method: {method}, payload: {payload}")
+                logger.warning(f"unknown method: {method}, payload: {payload}")
         except Exception as e:
-            print(f"[Relay] error: {e}, payload: {payload}")
+            logger.error(f"error: {e}, payload: {payload}")
 
     def on_feishu_msg(self, payload: P2ImMessageReceiveV1Data) -> None:
         """处理 Feishu 事件，归一化并记录。"""
@@ -99,13 +102,13 @@ class RelayHandle:
         # 1) 按 trace_id 过滤重复事件
         trace_id = payload.message.message_id
         if trace_id in self._seen_trace_ids:
-            print(f"[Relay] duplicate event ignored: trace_id={trace_id}")
+            logger.info(f"duplicate event ignored: trace_id={trace_id}")
             return
 
         # 2) 丢弃 10 分钟之前的消息
         msg_ts = int(payload.message.create_time) 
         if now_sec - (msg_ts // 1000) > 600:
-            print(f"[Relay] expired message, msg_id={trace_id}")
+            logger.info(f"expired message, msg_id={trace_id}")
             return
         
         # Extract message information
@@ -146,12 +149,12 @@ class RelayHandle:
             
     # ---------- Agent -> Relay ----------
     def _on_errors(self, action: Optional[str], detail: Any, session: Optional[str]) -> None:
-        print(f"[Relay] errors {session}, {action}, {detail}")
+        logger.error(f"errors {session}, {action}, {detail}")
 
     def _on_respond(self, action: Optional[str], detail: Dict[str, Any], sessid: Optional[str]) -> None:
         # Normalize detail to dict
         if not isinstance(detail, dict):
-            print(f"[Relay] unknown detail: {detail}")
+            logger.warning(f"unknown detail: {detail}")
             return
 
         # send respond to feishu
@@ -180,7 +183,7 @@ class RelayHandle:
                 card_head['tags'] = 'DONE'
                 continue
         if not has_tool_result:
-            print(f"[Relay] not finish: {detail}")
+            logger.info(f"not finish: {detail}")
             return
         
         card_detail = {
@@ -195,12 +198,12 @@ class RelayHandle:
                 receive_id=user.open_id, 
                 receive_id_type="open_id",
             )
-            print(f"[Relay] respond task={sessid}, action={action}, open_id={user.open_id}")
+            logger.info(f"respond task={sessid}, action={action}, open_id={user.open_id}")
         else:
-            print(f"[Relay] respond task={sessid}, action={action}, no user_id")
+            logger.warning(f"respond task={sessid}, action={action}, no user_id")
 
     def _on_control(self, action: Optional[str], detail: Any, sessid: Optional[str]) -> None:
-        print(f"[Relay] control {sessid}, {action}, {detail}")
+        logger.info(f"control {sessid}, {action}, {detail}")
 
     # ---------- Feishu -> Relay ----------
     def _on_custom_event(self, data: lark.CustomizedEvent) -> None:
@@ -211,7 +214,7 @@ class RelayHandle:
         Args:
             data: Custom event data
         """
-        print(f'[Custom Event] type: {data.type}, data: {lark.JSON.marshal(data, indent=4)}')
+        logger.info(f"[Custom Event] type: {data.type}, data: {lark.JSON.marshal(data, indent=4)}")
         # Normalize and emit via callback
         try:
             normalized = {
@@ -234,7 +237,7 @@ class RelayHandle:
             sender: Sender information
         """
         if self.robot is None:
-            print(f'[Relay] text: {msg.content}, sender: {lark.JSON.marshal(sender, indent=4)}')
+            logger.info(f"text: {msg.content}, sender: {lark.JSON.marshal(sender, indent=4)}")
             return
         try:
             # 立即回复一个 OneSecond 表情
@@ -263,15 +266,15 @@ class RelayHandle:
                 )
 
             if "errmsg" in intent and intent['errmsg']:
-                print(f"[Relay] error message: {intent['errmsg']}")
+                logger.error(f"error message: {intent['errmsg']}")
                 self.feishu.reply_text(msg.message_id, intent['errmsg'])
                 return
             if 'message' in intent and intent['message']:
                 self.feishu.reply_text(msg.message_id, intent['message'])
-                print(f"[Relay] reply text: {msg.content}, resp: {intent}")
+                logger.info(f"reply text: {msg.content}, resp: {intent}")
             if 'emoji' in intent and intent['emoji']:
                 self.feishu.reply_emoji(msg.message_id, intent['emoji'])
-                print(f"[Relay] reply emoji: {msg.content}, resp: {intent}")
+                logger.info(f"reply emoji: {msg.content}, resp: {intent}")
 
             # send intent to robot if intent == 'wait'
             is_type_wait = 'intent' in intent and intent['intent'] == 'wait'
@@ -279,7 +282,7 @@ class RelayHandle:
             if is_type_wait or is_msg_wait:
                 self._cache_intent(msg, 10)
         except Exception as e:
-            print(f"[Relay] failed to reply text: {msg.content}, error: {e}")
+            logger.error(f"failed to reply text: {msg.content}, error: {e}")
     
     def _on_image_msg(self, msg: EventMessage, sender: EventSender) -> None:
         """
@@ -291,7 +294,7 @@ class RelayHandle:
             sender: Sender information
         """
         if self.robot is None:
-            print(f'[Relay] image: {msg.content}, sender: {lark.JSON.marshal(sender, indent=4)}')
+            logger.info(f"image: {msg.content}, sender: {lark.JSON.marshal(sender, indent=4)}")
             return
         try:
             # 立即回复一个 OneSecond 表情
@@ -301,7 +304,7 @@ class RelayHandle:
             if saved.success():
                 self._cache_upload(msg, saved.file_name)
         except Exception as e:
-            print(f"[Relay] failed to reply image: {msg.content}, error: {e}")
+            logger.error(f"failed to reply image: {msg.content}, error: {e}")
     
     def _on_file_msg(self, msg: EventMessage, sender: EventSender) -> None:
         """
@@ -313,7 +316,7 @@ class RelayHandle:
             sender: Sender information
         """
         if self.robot is None:
-            print(f'[Relay] file: {msg.content}, sender: {lark.JSON.marshal(sender, indent=4)}')
+            logger.info(f"file: {msg.content}, sender: {lark.JSON.marshal(sender, indent=4)}")
             return
         try:
             # 立即回复一个 OneSecond 表情
@@ -323,7 +326,7 @@ class RelayHandle:
             if saved.success():
                 self._cache_upload(msg, saved.file_name)
         except Exception as e:
-            print(f"[Relay] failed to reply file: {msg.content}, error: {e}")
+            logger.error(f"failed to reply file: {msg.content}, error: {e}")
 
     def _cache_intent(self, msg: EventMessage, timeout: int = 10) -> None:
         """缓存待处理意图，等待后续文件/图片合并调用机器人。"""
@@ -343,7 +346,7 @@ class RelayHandle:
     def _cache_upload(self, msg: EventMessage, filename: str) -> None:
         """缓存上传文件，并在存在待处理文字时与文字合并调用机器人。"""
         chat_id, msg_id = msg.chat_id, msg.message_id
-        print(f"[Relay] cached upload for chat={chat_id}: {filename}")
+        logger.info(f"cached upload for chat={chat_id}: {filename}")
         state = self._pending_intents.get(chat_id) or {
             'text': None, 'uploads': [],
             'timer': None, 'message_id': None,
@@ -355,7 +358,7 @@ class RelayHandle:
         self._pending_intents[chat_id] = state
 
         if not state.get('text'):
-            print(f"[Relay] really cached upload for chat={chat_id}: {filename}")
+            logger.info(f"really cached upload for chat={chat_id}: {filename}")
             return
         
         try:
@@ -369,9 +372,9 @@ class RelayHandle:
                 self.feishu.reply_text(msg_id, resp['message'])
             if 'emoji' in resp and resp['emoji']:
                 self.feishu.reply_emoji(msg_id, resp['emoji'])
-            print(f"[Relay] merged text+uploads: {resp}")
+            logger.info(f"merged text+uploads: {resp}")
         except Exception as ex:
-            print(f"[Relay] failed to merge text+uploads: {ex}")
+            logger.error(f"failed to merge text+uploads: {ex}")
         finally:
             if state.get('timer'):
                 state['timer'].cancel()
@@ -410,7 +413,7 @@ class RelayHandle:
         if not text or len(uploads) == 0:
             # 没有文字则直接清理，不进行空意图请求
             self._pending_intents.pop(chat_id, None)
-            print(f"[Relay] wait-timeout abort: {chat_id}")
+            logger.info(f"wait-timeout abort: {chat_id}")
             return
         # 如果仍未有附件，触发一次仅文本的处理并清理状态
         try:
@@ -422,8 +425,8 @@ class RelayHandle:
             if 'emoji' in resp:
                 msg_id = state.get('message_id')
                 self.feishu.reply_emoji(msg_id, resp['emoji'])
-            print(f"[Relay] wait-timeout proceed text-only: {resp}")
+            logger.info(f"wait-timeout proceed text-only: {resp}")
         except Exception as ex:
-            print(f"[Relay] wait-timeout failed: {ex}")
+            logger.error(f"wait-timeout failed: {ex}")
         finally:
             self._pending_intents.pop(chat_id, None)
